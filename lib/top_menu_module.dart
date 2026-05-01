@@ -106,38 +106,38 @@ class _TopMenuPalette {
     switch (group) {
       case 'Special':
         return const _TopMenuPalette(
-          primary: Color(0xFF4F46E5),
-          surface: Color(0xFFEEF2FF),
+          primary: AppUi.primary,
+          surface: Color(0xFFEFF6FF),
           icon: Icons.auto_awesome,
         );
       case 'Periodical':
         return const _TopMenuPalette(
-          primary: Color(0xFF0D9488),
-          surface: Color(0xFFCCFBF1),
+          primary: AppUi.teal,
+          surface: Color(0xFFECFEF6),
           icon: Icons.calendar_month,
         );
       case 'Utility':
         return const _TopMenuPalette(
-          primary: Color(0xFFB45309),
-          surface: Color(0xFFFEF3C7),
+          primary: AppUi.warning,
+          surface: Color(0xFFFFF7ED),
           icon: Icons.build_circle,
         );
       case 'Printers':
         return const _TopMenuPalette(
-          primary: Color(0xFF6D28D9),
-          surface: Color(0xFFEDE9FE),
+          primary: AppUi.primary,
+          surface: Color(0xFFEFF6FF),
           icon: Icons.print,
         );
       case 'ActiveWork':
         return const _TopMenuPalette(
-          primary: Color(0xFFEA580C),
-          surface: Color(0xFFFFEDD5),
+          primary: AppUi.warning,
+          surface: Color(0xFFFFF7ED),
           icon: Icons.bolt,
         );
       case 'Infoserver':
         return const _TopMenuPalette(
-          primary: Color(0xFF0369A1),
-          surface: Color(0xFFE0F2FE),
+          primary: AppUi.teal,
+          surface: Color(0xFFECFEF6),
           icon: Icons.cloud,
         );
       default:
@@ -527,8 +527,8 @@ class _MedicalCalculatorDialogState extends State<MedicalCalculatorDialog> {
     final bg = equals
         ? const Color(0xFFF97316)
         : muted
-            ? const Color(0xFF334155)
-            : const Color(0xFF1E293B);
+        ? const Color(0xFF334155)
+        : const Color(0xFF1E293B);
     final fg = equals ? Colors.white : const Color(0xFFE2E8F0);
     final display = label == '/' ? '÷' : (label == '*' ? '×' : label);
     return Expanded(
@@ -704,7 +704,10 @@ class _MedicalCalculatorDialogState extends State<MedicalCalculatorDialog> {
                   Container(
                     height: 76,
                     alignment: Alignment.centerRight,
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: const Color(0xFF020617),
                       borderRadius: BorderRadius.circular(14),
@@ -773,6 +776,7 @@ class _MedicalCalculatorDialogState extends State<MedicalCalculatorDialog> {
     );
   }
 }
+
 String _fmtCalc(double v) {
   if (!v.isFinite) return 'Error';
   var t = v.toStringAsFixed(8);
@@ -864,13 +868,15 @@ Widget _tmCard({
   required Widget child,
 }) {
   return Card(
-    elevation: 0,
+    elevation: 1.2,
+    shadowColor: const Color(0xFF0F172A).withValues(alpha: 0.06),
+    color: AppUi.surface,
     shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(14),
-      side: BorderSide(color: palette.primary.withValues(alpha: 0.22)),
+      borderRadius: BorderRadius.circular(AppUi.radius),
+      side: BorderSide(color: AppUi.border),
     ),
     child: Padding(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -879,10 +885,10 @@ Widget _tmCard({
             style: TextStyle(
               fontWeight: FontWeight.w800,
               color: palette.primary,
-              fontSize: 13,
+              fontSize: 13.2,
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
           child,
         ],
       ),
@@ -891,10 +897,7 @@ Widget _tmCard({
 }
 
 class _DiscountRulesPanel extends StatefulWidget {
-  const _DiscountRulesPanel({
-    required this.palette,
-    required this.onRefresh,
-  });
+  const _DiscountRulesPanel({required this.palette, required this.onRefresh});
 
   final _TopMenuPalette palette;
   final VoidCallback onRefresh;
@@ -954,9 +957,15 @@ class _DiscountRulesPanelState extends State<_DiscountRulesPanel> {
                   border: OutlineInputBorder(),
                 ),
                 items: const [
-                  DropdownMenuItem(value: 'product', child: Text('Product name')),
+                  DropdownMenuItem(
+                    value: 'product',
+                    child: Text('Product name'),
+                  ),
                   DropdownMenuItem(value: 'category', child: Text('Category')),
-                  DropdownMenuItem(value: 'customer', child: Text('Customer / party')),
+                  DropdownMenuItem(
+                    value: 'customer',
+                    child: Text('Customer / party'),
+                  ),
                 ],
                 onChanged: (v) => setState(() => _scope = v ?? 'product'),
               ),
@@ -1009,9 +1018,7 @@ class _DiscountRulesPanelState extends State<_DiscountRulesPanel> {
                           final id = r['id'] as int?;
                           setState(() => discountRules.removeAt(i));
                           if (id != null) {
-                            unawaited(
-                              deleteJsonDocById(kCollDiscountRule, id),
-                            );
+                            unawaited(deleteJsonDocById(kCollDiscountRule, id));
                           }
                           widget.onRefresh();
                         },
@@ -1095,8 +1102,7 @@ class _SchemeOffersPanelState extends State<_SchemeOffersPanel> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               DropdownButtonFormField<String>(
-                value: _productHint ??
-                    (names.isNotEmpty ? names.first : null),
+                value: _productHint ?? (names.isNotEmpty ? names.first : null),
                 decoration: const InputDecoration(
                   labelText: 'Primary product (optional anchor)',
                   border: OutlineInputBorder(),
@@ -1205,8 +1211,7 @@ class _DoctorCommissionPanel extends StatefulWidget {
   final VoidCallback onRefresh;
 
   @override
-  State<_DoctorCommissionPanel> createState() =>
-      _DoctorCommissionPanelState();
+  State<_DoctorCommissionPanel> createState() => _DoctorCommissionPanelState();
 }
 
 class _DoctorCommissionPanelState extends State<_DoctorCommissionPanel> {
@@ -1321,9 +1326,7 @@ class _DoctorCommissionPanelState extends State<_DoctorCommissionPanel> {
                   border: TableBorder.all(color: Colors.black12),
                   children: [
                     TableRow(
-                      decoration: const BoxDecoration(
-                        color: Color(0xFFF8FAFC),
-                      ),
+                      decoration: const BoxDecoration(color: Color(0xFFF8FAFC)),
                       children: [
                         _cellH('Doctor'),
                         _cellH('Sales linked'),
@@ -1355,15 +1358,14 @@ class _DoctorCommissionPanelState extends State<_DoctorCommissionPanel> {
   }
 }
 
-Widget _cell(String t) => Padding(
-      padding: const EdgeInsets.all(8),
-      child: Text(t),
-    );
+Widget _cell(String t) =>
+    Padding(padding: const EdgeInsets.all(8), child: Text(t));
 
 Widget _cellH(String t) => Padding(
-      padding: const EdgeInsets.all(8),
-      child: Text(t, style: const TextStyle(fontWeight: FontWeight.w700)),
-    );
+  padding: const EdgeInsets.all(8),
+  child: Text(t, style: const TextStyle(fontWeight: FontWeight.w700)),
+);
+
 class _OrderChitRegisterPanel extends StatefulWidget {
   const _OrderChitRegisterPanel({
     required this.palette,
@@ -1525,8 +1527,7 @@ class _ScheduleRegisterPanel extends StatefulWidget {
   final VoidCallback onRefresh;
 
   @override
-  State<_ScheduleRegisterPanel> createState() =>
-      _ScheduleRegisterPanelState();
+  State<_ScheduleRegisterPanel> createState() => _ScheduleRegisterPanelState();
 }
 
 class _ScheduleRegisterPanelState extends State<_ScheduleRegisterPanel> {
@@ -1716,9 +1717,7 @@ class _InvoiceImportPanelState extends State<_InvoiceImportPanel> {
           TextField(
             controller: _json,
             maxLines: 10,
-            decoration: const InputDecoration(
-              border: OutlineInputBorder(),
-            ),
+            decoration: const InputDecoration(border: OutlineInputBorder()),
           ),
           const SizedBox(height: 12),
           FilledButton.icon(
@@ -1841,7 +1840,9 @@ class _ProformaHubPanelState extends State<_ProformaHubPanel> {
                     return ListTile(
                       title: Text('${p['party']}'),
                       subtitle: Text('${p['at']} · ${p['context']}'),
-                      trailing: Text('₹ ${_tmParseDouble(p['amount']).toStringAsFixed(2)}'),
+                      trailing: Text(
+                        '₹ ${_tmParseDouble(p['amount']).toStringAsFixed(2)}',
+                      ),
                     );
                   },
                 ),
@@ -1875,13 +1876,11 @@ class _ExpiryManagementPanelState extends State<_ExpiryManagementPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final rows = _collectBatchExpiryRows()
-        .where((r) {
-          final d = _tryParseExpiryDate('${r['expiry']}');
-          if (d == null) return true;
-          return !d.isAfter(_cutoff);
-        })
-        .toList();
+    final rows = _collectBatchExpiryRows().where((r) {
+      final d = _tryParseExpiryDate('${r['expiry']}');
+      if (d == null) return true;
+      return !d.isAfter(_cutoff);
+    }).toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1979,7 +1978,9 @@ class _PhysicalVerificationPanel extends StatelessWidget {
                   for (final p in products.take(150))
                     DataRow(
                       cells: [
-                        DataCell(Text('${p['name'] ?? p['productName'] ?? ''}')),
+                        DataCell(
+                          Text('${p['name'] ?? p['productName'] ?? ''}'),
+                        ),
                         DataCell(Text('${p['pack'] ?? ''}')),
                         DataCell(Text('${p['stock'] ?? ''}')),
                         DataCell(
@@ -1996,7 +1997,7 @@ class _PhysicalVerificationPanel extends StatelessWidget {
 
 enum _BackupPanelMode { backupOnly, restoreOnly, both }
 
-class _SessionBackupPanel extends StatelessWidget {
+class _SessionBackupPanel extends StatefulWidget {
   const _SessionBackupPanel({
     required this.palette,
     required this.mode,
@@ -2007,7 +2008,22 @@ class _SessionBackupPanel extends StatelessWidget {
   final _BackupPanelMode mode;
   final VoidCallback onRefresh;
 
+  @override
+  State<_SessionBackupPanel> createState() => _SessionBackupPanelState();
+}
+
+class _SessionBackupPanelState extends State<_SessionBackupPanel> {
+  final _restorePasteController = TextEditingController();
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _restorePasteController.dispose();
+    super.dispose();
+  }
+
   Future<void> _backup(BuildContext context) async {
+    setState(() => _busy = true);
     try {
       final json = await exportFullSystemJsonString();
       appDataBackupJson = json;
@@ -2017,7 +2033,7 @@ class _SessionBackupPanel extends StatelessWidget {
         lastAppBackupAt!.toIso8601String(),
       );
       appendAppActivityLog('Full system backup (JSON)');
-      onRefresh();
+      widget.onRefresh();
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -2028,20 +2044,25 @@ class _SessionBackupPanel extends StatelessWidget {
       );
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Backup failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Backup failed: $e')));
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
     }
   }
 
-  Future<void> _restore(BuildContext context) async {
-    final raw = appDataBackupJson;
+  Future<void> _restore(BuildContext context, {String? explicitJson}) async {
+    final raw = explicitJson ?? appDataBackupJson;
     if (raw == null || raw.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No backup available.')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('No backup available.')));
       return;
     }
+    setState(() => _busy = true);
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map<String, dynamic>) {
@@ -2057,11 +2078,10 @@ class _SessionBackupPanel extends StatelessWidget {
           if (v is List) {
             target
               ..clear()
-              ..addAll(
-                v.map((e) => Map<String, dynamic>.from(e as Map)),
-              );
+              ..addAll(v.map((e) => Map<String, dynamic>.from(e as Map)));
           }
         }
+
         rep('products', products);
         rep('salesInvoiceRecords', salesInvoiceRecords);
         rep('purchaseBillRecords', purchaseBillRecords);
@@ -2073,7 +2093,7 @@ class _SessionBackupPanel extends StatelessWidget {
         await rewriteAllPersistentCollections();
         appendAppActivityLog('Legacy snapshot restore + DB rewrite');
       }
-      onRefresh();
+      widget.onRefresh();
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -2084,20 +2104,26 @@ class _SessionBackupPanel extends StatelessWidget {
       );
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Restore failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Restore failed: $e')));
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final showB =
-        mode == _BackupPanelMode.backupOnly || mode == _BackupPanelMode.both;
+        widget.mode == _BackupPanelMode.backupOnly ||
+        widget.mode == _BackupPanelMode.both;
     final showR =
-        mode == _BackupPanelMode.restoreOnly || mode == _BackupPanelMode.both;
+        widget.mode == _BackupPanelMode.restoreOnly ||
+        widget.mode == _BackupPanelMode.both;
     return _tmCard(
-      palette: palette,
+      palette: widget.palette,
       title: 'Full system backup & restore',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2110,19 +2136,24 @@ class _SessionBackupPanel extends StatelessWidget {
           if (appDataBackupJson != null)
             Text('Snapshot size: ${appDataBackupJson!.length} chars'),
           const SizedBox(height: 12),
+          if (_busy)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 10),
+              child: LinearProgressIndicator(minHeight: 3),
+            ),
           Wrap(
             spacing: 10,
             runSpacing: 10,
             children: [
               if (showB)
                 FilledButton.icon(
-                  onPressed: () => unawaited(_backup(context)),
+                  onPressed: _busy ? null : () => unawaited(_backup(context)),
                   icon: const Icon(Icons.save_alt),
                   label: const Text('Backup now'),
                 ),
               if (showR)
                 FilledButton.tonalIcon(
-                  onPressed: () => unawaited(_restore(context)),
+                  onPressed: _busy ? null : () => unawaited(_restore(context)),
                   icon: const Icon(Icons.restore),
                   label: const Text('Restore last'),
                 ),
@@ -2140,6 +2171,30 @@ class _SessionBackupPanel extends StatelessWidget {
               ),
             ],
           ),
+          if (showR) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _restorePasteController,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                labelText: 'Paste backup JSON to restore',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            FilledButton.tonalIcon(
+              onPressed: _busy
+                  ? null
+                  : () => unawaited(
+                      _restore(
+                        context,
+                        explicitJson: _restorePasteController.text.trim(),
+                      ),
+                    ),
+              icon: const Icon(Icons.upload_file),
+              label: const Text('Restore pasted JSON'),
+            ),
+          ],
         ],
       ),
     );
@@ -2147,10 +2202,7 @@ class _SessionBackupPanel extends StatelessWidget {
 }
 
 class _DailyClosingPanel extends StatefulWidget {
-  const _DailyClosingPanel({
-    required this.palette,
-    required this.onRefresh,
-  });
+  const _DailyClosingPanel({required this.palette, required this.onRefresh});
 
   final _TopMenuPalette palette;
   final VoidCallback onRefresh;
@@ -2224,9 +2276,9 @@ class _DailyClosingPanelState extends State<_DailyClosingPanel> {
       );
     } catch (e) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Daily close failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Daily close failed: $e')));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -2256,11 +2308,15 @@ class _DailyClosingPanelState extends State<_DailyClosingPanel> {
             children: [
               Text('Total sales: ₹ ${s.toStringAsFixed(2)}'),
               Text('Total purchase: ₹ ${p.toStringAsFixed(2)}'),
-              Text('Net trade (sales − purchase): ₹ ${netTrade.toStringAsFixed(2)}'),
+              Text(
+                'Net trade (sales − purchase): ₹ ${netTrade.toStringAsFixed(2)}',
+              ),
               const Divider(height: 20),
               Text('Total receipts: ₹ ${totalReceipt.toStringAsFixed(2)}'),
               Text('Total payments: ₹ ${totalPayment.toStringAsFixed(2)}'),
-              Text('Receipts − payments: ₹ ${receiptPaymentNet.toStringAsFixed(2)}'),
+              Text(
+                'Receipts − payments: ₹ ${receiptPaymentNet.toStringAsFixed(2)}',
+              ),
               const Divider(height: 20),
               Text('Cash receipts: ₹ ${cashReceipt.toStringAsFixed(2)}'),
               Text('Cash payments: ₹ ${cashPayment.toStringAsFixed(2)}'),
@@ -2295,9 +2351,7 @@ class _DailyClosingPanelState extends State<_DailyClosingPanel> {
                   itemCount: dailyClosingRecords.length,
                   itemBuilder: (context, i) {
                     final r = dailyClosingRecords[i];
-                    final sales = _tmParseDouble(
-                      r['totalSales'] ?? r['sales'],
-                    );
+                    final sales = _tmParseDouble(r['totalSales'] ?? r['sales']);
                     final pur = _tmParseDouble(
                       r['totalPurchase'] ?? r['purchase'],
                     );
@@ -2367,6 +2421,7 @@ class _CalculatorWorkspacePanelState extends State<_CalculatorWorkspacePanel> {
     );
   }
 }
+
 class _ImportExportPanel extends StatefulWidget {
   const _ImportExportPanel({required this.palette, required this.onRefresh});
 
@@ -2486,29 +2541,46 @@ class _StoreSettingsPanelState extends State<_StoreSettingsPanel> {
   late final _name = TextEditingController(
     text: '${globalMedicalStoreSettings['storeName'] ?? ''}',
   );
+  late final _owner = TextEditingController(
+    text: '${globalMedicalStoreSettings['ownerName'] ?? ''}',
+  );
   late final _gst = TextEditingController(
     text: '${globalMedicalStoreSettings['gstNumber'] ?? ''}',
   );
-  late String _currency =
-      '${globalMedicalStoreSettings['currency'] ?? 'INR'}';
-  late String _theme =
-      '${globalMedicalStoreSettings['themeHint'] ?? 'system'}';
+  late final _address = TextEditingController(
+    text: '${globalMedicalStoreSettings['address'] ?? ''}',
+  );
+  late final _phone = TextEditingController(
+    text: '${globalMedicalStoreSettings['phone'] ?? ''}',
+  );
+  late String _currency = '${globalMedicalStoreSettings['currency'] ?? 'INR'}';
+  late String _invoiceFormat =
+      '${globalMedicalStoreSettings['invoiceFormat'] ?? 'Standard A4'}';
 
   @override
   void dispose() {
     _name.dispose();
+    _owner.dispose();
     _gst.dispose();
+    _address.dispose();
+    _phone.dispose();
     super.dispose();
   }
 
   void _save() {
     globalMedicalStoreSettings['storeName'] = _name.text.trim();
+    globalMedicalStoreSettings['ownerName'] = _owner.text.trim();
     globalMedicalStoreSettings['gstNumber'] = _gst.text.trim();
+    globalMedicalStoreSettings['address'] = _address.text.trim();
+    globalMedicalStoreSettings['phone'] = _phone.text.trim();
     globalMedicalStoreSettings['currency'] = _currency;
-    globalMedicalStoreSettings['themeHint'] = _theme;
+    globalMedicalStoreSettings['invoiceFormat'] = _invoiceFormat;
     unawaited(persistGlobalSettingsSnapshot());
     appendAppActivityLog('Store settings saved');
     widget.onRefresh();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Store settings saved successfully.')),
+    );
     setState(() {});
   }
 
@@ -2529,9 +2601,34 @@ class _StoreSettingsPanelState extends State<_StoreSettingsPanel> {
           ),
           const SizedBox(height: 10),
           TextField(
+            controller: _owner,
+            decoration: const InputDecoration(
+              labelText: 'Owner name',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
             controller: _gst,
             decoration: const InputDecoration(
               labelText: 'GST number',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _address,
+            maxLines: 2,
+            decoration: const InputDecoration(
+              labelText: 'Store address',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _phone,
+            decoration: const InputDecoration(
+              labelText: 'Phone',
               border: OutlineInputBorder(),
             ),
           ),
@@ -2545,22 +2642,29 @@ class _StoreSettingsPanelState extends State<_StoreSettingsPanel> {
             items: const [
               DropdownMenuItem(value: 'INR', child: Text('INR')),
               DropdownMenuItem(value: 'USD', child: Text('USD')),
+              DropdownMenuItem(value: 'EUR', child: Text('EUR')),
             ],
             onChanged: (v) => setState(() => _currency = v ?? 'INR'),
           ),
           const SizedBox(height: 10),
           DropdownButtonFormField<String>(
-            value: _theme,
+            value: _invoiceFormat,
             decoration: const InputDecoration(
-              labelText: 'Theme hint',
+              labelText: 'Invoice format',
               border: OutlineInputBorder(),
             ),
             items: const [
-              DropdownMenuItem(value: 'system', child: Text('System')),
-              DropdownMenuItem(value: 'light', child: Text('Light')),
-              DropdownMenuItem(value: 'dark', child: Text('Dark')),
+              DropdownMenuItem(
+                value: 'Standard A4',
+                child: Text('Standard A4'),
+              ),
+              DropdownMenuItem(
+                value: 'Compact Thermal',
+                child: Text('Compact Thermal'),
+              ),
             ],
-            onChanged: (v) => setState(() => _theme = v ?? 'system'),
+            onChanged: (v) =>
+                setState(() => _invoiceFormat = v ?? 'Standard A4'),
           ),
           const SizedBox(height: 14),
           FilledButton.icon(
@@ -2683,9 +2787,7 @@ class _ReportPrintPanelState extends State<_ReportPrintPanel> {
         children: [
           DropdownButtonFormField<String>(
             value: _type,
-            decoration: const InputDecoration(
-              border: OutlineInputBorder(),
-            ),
+            decoration: const InputDecoration(border: OutlineInputBorder()),
             items: const [
               DropdownMenuItem(
                 value: 'Sales summary',
@@ -2726,7 +2828,9 @@ class _ReportPrintPanelState extends State<_ReportPrintPanel> {
               appendAppActivityLog('Report prepared: $_type');
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Report text copied to clipboard.')),
+                  const SnackBar(
+                    content: Text('Report text copied to clipboard.'),
+                  ),
                 );
               }
             },
@@ -2807,9 +2911,7 @@ class _DefaultPrinterPanelState extends State<_DefaultPrinterPanel> {
         children: [
           DropdownButtonFormField<String>(
             value: _printer,
-            decoration: const InputDecoration(
-              border: OutlineInputBorder(),
-            ),
+            decoration: const InputDecoration(border: OutlineInputBorder()),
             items: const [
               DropdownMenuItem(
                 value: 'System default',
@@ -2819,10 +2921,7 @@ class _DefaultPrinterPanelState extends State<_DefaultPrinterPanel> {
                 value: 'USB thermal',
                 child: Text('USB thermal'),
               ),
-              DropdownMenuItem(
-                value: 'Network A4',
-                child: Text('Network A4'),
-              ),
+              DropdownMenuItem(value: 'Network A4', child: Text('Network A4')),
             ],
             onChanged: (v) => setState(() => _printer = v ?? 'System default'),
           ),
@@ -3228,9 +3327,7 @@ class _InfoserverTransferPanelState extends State<_InfoserverTransferPanel> {
           TextField(
             controller: _payload,
             maxLines: 6,
-            decoration: const InputDecoration(
-              border: OutlineInputBorder(),
-            ),
+            decoration: const InputDecoration(border: OutlineInputBorder()),
           ),
           const SizedBox(height: 10),
           Row(
@@ -3397,12 +3494,7 @@ class _InfoserverAnalyticsPanel extends StatelessWidget {
   }
 }
 
-Widget _statCard(
-  _TopMenuPalette p,
-  String title,
-  String value,
-  IconData icon,
-) {
+Widget _statCard(_TopMenuPalette p, String title, String value, IconData icon) {
   return Card(
     elevation: 0,
     color: p.surface,
@@ -3495,7 +3587,11 @@ class _SchemeDiscountReportPanel extends StatelessWidget {
           title: 'Discount rules (${discountRules.length})',
           child: discountRules.isEmpty
               ? const Text('No discount rules.')
-              : Text(discountRules.map((e) => '${e['scope']}:${e['target']}').join('\n')),
+              : Text(
+                  discountRules
+                      .map((e) => '${e['scope']}:${e['target']}')
+                      .join('\n'),
+                ),
         ),
         const SizedBox(height: 12),
         _tmCard(
@@ -3505,7 +3601,10 @@ class _SchemeDiscountReportPanel extends StatelessWidget {
               ? const Text('No schemes.')
               : Text(
                   schemeOffers
-                      .map((e) => '${e['label']} (${e['active'] == true ? 'ON' : 'OFF'})')
+                      .map(
+                        (e) =>
+                            '${e['label']} (${e['active'] == true ? 'ON' : 'OFF'})',
+                      )
                       .join('\n'),
                 ),
         ),
@@ -3759,9 +3858,13 @@ class _DynamicOperationsDeck extends StatelessWidget {
                     const Icon(Icons.circle, size: 8, color: Color(0xFF94A3B8)),
                     const SizedBox(width: 10),
                     Expanded(
-                      child: Text('${r['date']} · ${r['billNo']} · ${r['party']}'),
+                      child: Text(
+                        '${r['date']} · ${r['billNo']} · ${r['party']}',
+                      ),
                     ),
-                    Text('₹ ${_tmParseDouble(r['grandTotal']).toStringAsFixed(0)}'),
+                    Text(
+                      '₹ ${_tmParseDouble(r['grandTotal']).toStringAsFixed(0)}',
+                    ),
                   ],
                 ),
               ),
@@ -3780,7 +3883,10 @@ class _DynamicOperationsDeck extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Accounts snapshot', style: TextStyle(fontWeight: FontWeight.w700)),
+                  const Text(
+                    'Accounts snapshot',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
                   Text('${accounts.length} ledgers'),
                 ],
               ),
@@ -3790,7 +3896,10 @@ class _DynamicOperationsDeck extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Doctors', style: TextStyle(fontWeight: FontWeight.w700)),
+                  const Text(
+                    'Doctors',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
                   Text('${doctors.length} records'),
                 ],
               ),
@@ -3828,7 +3937,10 @@ Widget _miniTile(String k, String v) {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(k, style: const TextStyle(fontSize: 11)),
-        Text(v, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18)),
+        Text(
+          v,
+          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+        ),
       ],
     ),
   );

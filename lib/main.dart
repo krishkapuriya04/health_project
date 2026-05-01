@@ -12,8 +12,13 @@ part 'data_store.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await HealthDatabase.instance.initialize();
-  await hydrateAppDataFromDatabase();
+  try {
+    await HealthDatabase.instance.initialize();
+    await hydrateAppDataFromDatabase();
+    // await fillDemoDataNow(); // Uncomment once to merge idempotent demo data, then comment again.
+  } catch (e, st) {
+    debugPrint('main startup: $e\n$st');
+  }
   runApp(const MyApp());
 }
 
@@ -71,47 +76,80 @@ List<Map<String, dynamic>> cashierRecords = [];
 List<Map<String, dynamic>> shortageNotifierRecords = [];
 List<Map<String, dynamic>> salesInvoiceRecords = [];
 List<Map<String, dynamic>> purchaseBillRecords = [];
+
 /// Order chits / counter orders (Special → Order Chit Register).
 List<Map<String, dynamic>> orderChitRecords = [];
 int _orderChitSeed = 1;
+
 /// Schedule rows (Special → Schedule Register).
 List<Map<String, dynamic>> scheduleRegisterRecords = [];
 int _scheduleRegisterSeed = 1;
+
 /// Proforma / draft invoices (Special → Proforma screens).
 List<Map<String, dynamic>> proformaInvoiceRecords = [];
 int _proformaInvoiceSeed = 1;
+
 /// Discount rules: `scope` product|category|customer, `target`, `percent`.
 List<Map<String, dynamic>> discountRules = [];
 int _discountRuleSeed = 1;
+
 /// Schemes: buyX, getY, combo label, active.
 List<Map<String, dynamic>> schemeOffers = [];
 int _schemeOfferSeed = 1;
+
 /// Doctor commission config: doctorName, percent, notes.
 List<Map<String, dynamic>> doctorCommissions = [];
 int _doctorCommissionSeed = 1;
+
 /// End-of-day snapshots (Periodical → Daily Closing).
 List<Map<String, dynamic>> dailyClosingRecords = [];
 int _dailyClosingSeed = 1;
+
 /// In-memory session backup (Utility → Backup / Restore).
 DateTime? lastAppBackupAt;
 String? appDataBackupJson;
+
 /// User-facing activity log (ActiveWork / audit).
 List<Map<String, dynamic>> appActivityLog = [];
+
 /// Pending operational tasks (ActiveWork).
 List<Map<String, dynamic>> pendingWorkItems = [];
 int _pendingWorkSeed = 1;
+
 /// Store-wide settings (Utility → Store Settings).
 final Map<String, dynamic> globalMedicalStoreSettings = {
-  'storeName': 'Medical Store',
+  'storeName': 'Health+ Medical Store',
+  'ownerName': '',
   'gstNumber': '',
+  'address': '',
+  'phone': '',
   'currency': 'INR',
-  'themeHint': 'system',
+  'invoiceFormat': 'Standard A4',
 };
+
+class AppUi {
+  static const Color primary = Color(0xFF2563EB);
+  static const Color primarySoft = Color(0xFFDBEAFE);
+  static const Color teal = Color(0xFF0D9488);
+  static const Color success = Color(0xFF16A34A);
+  static const Color warning = Color(0xFFF59E0B);
+  static const Color danger = Color(0xFFDC2626);
+  static const Color surface = Color(0xFFFFFFFF);
+  static const Color surfaceAlt = Color(0xFFF8FAFC);
+  static const Color border = Color(0xFFE2E8F0);
+  static const Color text = Color(0xFF0F172A);
+  static const Color textSoft = Color(0xFF64748B);
+  static const double radius = 12;
+  static const double sectionGap = 10;
+}
+
 /// Printer / label queue messages (last job).
 String? lastPrintJobSummary;
+
 /// Infoserver last sync (UI state).
 DateTime? lastInfoserverSyncAt;
 String? lastInfoserverSyncMessage;
+
 /// Sales bill no → `Pending` | `Generated` (e-invoicing UI).
 final Map<String, String> einvoiceStatusByBillNo = {};
 final Map<String, List<Map<String, dynamic>>> accountModuleRecords = {};
@@ -178,6 +216,169 @@ CREATE TABLE IF NOT EXISTS app_kv (
 ''');
   }
 
+  /// Normalized medical-store schema (FK-enabled). Coexists with [json_documents] / legacy *_master.
+  static Future<void> _createMedStoreRelationalTables(Database db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  mobile TEXT,
+  city TEXT,
+  gst TEXT,
+  address TEXT,
+  account_type TEXT,
+  opening_balance REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS products (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  barcode TEXT,
+  hsn TEXT,
+  mrp REAL,
+  sale_rate REAL,
+  stock REAL NOT NULL DEFAULT 0,
+  reorder_level REAL,
+  expiry_date TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS sales_invoices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bill_no TEXT NOT NULL,
+  series TEXT,
+  invoice_date TEXT NOT NULL,
+  party_name TEXT,
+  account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  doctor TEXT,
+  patient TEXT,
+  subtotal REAL NOT NULL DEFAULT 0,
+  discount_percent REAL NOT NULL DEFAULT 0,
+  discount_amount REAL NOT NULL DEFAULT 0,
+  scheme_discount REAL NOT NULL DEFAULT 0,
+  sgst REAL NOT NULL DEFAULT 0,
+  cgst REAL NOT NULL DEFAULT 0,
+  igst REAL NOT NULL DEFAULT 0,
+  round_off REAL NOT NULL DEFAULT 0,
+  grand_total REAL NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(series, bill_no)
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS sales_invoice_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  invoice_id INTEGER NOT NULL REFERENCES sales_invoices(id) ON DELETE CASCADE,
+  line_no INTEGER NOT NULL,
+  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+  product_name TEXT NOT NULL,
+  pack TEXT,
+  batch TEXT,
+  expiry TEXT,
+  qty REAL NOT NULL,
+  free_qty REAL NOT NULL DEFAULT 0,
+  rate REAL NOT NULL,
+  gst_percent REAL NOT NULL DEFAULT 0,
+  amount REAL NOT NULL,
+  UNIQUE(invoice_id, line_no)
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS purchases (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bill_no TEXT NOT NULL,
+  series TEXT,
+  purchase_date TEXT NOT NULL,
+  party_name TEXT,
+  supplier_account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  subtotal REAL NOT NULL DEFAULT 0,
+  discount_amount REAL NOT NULL DEFAULT 0,
+  scheme_discount REAL NOT NULL DEFAULT 0,
+  sgst REAL NOT NULL DEFAULT 0,
+  cgst REAL NOT NULL DEFAULT 0,
+  igst REAL NOT NULL DEFAULT 0,
+  round_off REAL NOT NULL DEFAULT 0,
+  grand_total REAL NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(series, bill_no)
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS purchase_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  purchase_id INTEGER NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
+  line_no INTEGER NOT NULL,
+  product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+  product_name TEXT NOT NULL,
+  pack TEXT,
+  batch TEXT,
+  expiry TEXT,
+  qty REAL NOT NULL,
+  free_qty REAL NOT NULL DEFAULT 0,
+  rate REAL NOT NULL,
+  gst_percent REAL NOT NULL DEFAULT 0,
+  amount REAL NOT NULL,
+  UNIQUE(purchase_id, line_no)
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS payment_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_type TEXT NOT NULL CHECK(entry_type IN ('payment','receipt')),
+  voucher_date TEXT NOT NULL,
+  account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  amount REAL NOT NULL,
+  reference_no TEXT,
+  remarks TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS business_settings (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS daily_closing (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  closing_date TEXT NOT NULL UNIQUE,
+  total_sales REAL NOT NULL DEFAULT 0,
+  total_purchase REAL NOT NULL DEFAULT 0,
+  total_receipt REAL NOT NULL DEFAULT 0,
+  total_payment REAL NOT NULL DEFAULT 0,
+  closing_cash REAL NOT NULL DEFAULT 0,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_sales_items_invoice ON sales_invoice_items(invoice_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_purchase_items_purchase ON purchase_items(purchase_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_payment_receipts_account ON payment_receipts(account_id)',
+    );
+  }
+
+  static Future<void> _enableForeignKeys(Database db) async {
+    await db.execute('PRAGMA foreign_keys = ON');
+  }
+
   bool get hasPersistentSql => !_useMemoryStore && _db != null;
 
   Future<void> upsertJsonDocument(
@@ -188,17 +389,23 @@ CREATE TABLE IF NOT EXISTS app_kv (
     if (!hasPersistentSql) return;
     try {
       final db = _db!;
-      await db.insert(
-        'json_documents',
-        {
-          'collection': collection,
-          'doc_id': docId,
-          'payload': jsonEncode(doc),
-          'updated_at': DateTime.now().toIso8601String(),
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
+      await db.insert('json_documents', {
+        'collection': collection,
+        'doc_id': docId,
+        'payload': jsonEncode(doc),
+        'updated_at': DateTime.now().toIso8601String(),
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+      if (kDebugMode) {
+        debugPrint(
+          '[DB] upsertJsonDocument OK collection=$collection docId=$docId',
+        );
+      }
+    } catch (e, st) {
+      debugPrint(
+        '[DB] upsertJsonDocument FAILED collection=$collection docId=$docId: $e\n$st',
       );
-    } catch (_) {}
+      rethrow;
+    }
   }
 
   Future<void> deleteJsonDocument(String collection, int docId) async {
@@ -210,7 +417,17 @@ CREATE TABLE IF NOT EXISTS app_kv (
         where: 'collection = ? AND doc_id = ?',
         whereArgs: [collection, docId],
       );
-    } catch (_) {}
+      if (kDebugMode) {
+        debugPrint(
+          '[DB] deleteJsonDocument OK collection=$collection docId=$docId',
+        );
+      }
+    } catch (e, st) {
+      debugPrint(
+        '[DB] deleteJsonDocument FAILED collection=$collection docId=$docId: $e\n$st',
+      );
+      rethrow;
+    }
   }
 
   Future<List<Map<String, dynamic>>> loadJsonCollection(
@@ -236,7 +453,8 @@ CREATE TABLE IF NOT EXISTS app_kv (
         }
       }
       return out;
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[DB] loadJsonCollection FAILED $collection: $e\n$st');
       return [];
     }
   }
@@ -245,15 +463,11 @@ CREATE TABLE IF NOT EXISTS app_kv (
     if (!hasPersistentSql) return;
     try {
       final db = _db!;
-      await db.insert(
-        'app_kv',
-        {
-          'k': key,
-          'v': value,
-          'updated_at': DateTime.now().toIso8601String(),
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+      await db.insert('app_kv', {
+        'k': key,
+        'v': value,
+        'updated_at': DateTime.now().toIso8601String(),
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
     } catch (_) {}
   }
 
@@ -295,7 +509,7 @@ CREATE TABLE IF NOT EXISTS app_kv (
       final String dbPath = p.join(await getDatabasesPath(), dbFileName);
       _db = await openDatabase(
         dbPath,
-        version: 2,
+        version: 3,
         onCreate: (db, version) async {
           await db.execute('''
             CREATE TABLE account_master (
@@ -333,14 +547,26 @@ CREATE TABLE IF NOT EXISTS app_kv (
             )
           ''');
           await _createJsonStoreTables(db);
+          await _createMedStoreRelationalTables(db);
+          await _enableForeignKeys(db);
         },
         onUpgrade: (db, oldVersion, newVersion) async {
           if (oldVersion < 2) {
             await _createJsonStoreTables(db);
           }
+          if (oldVersion < 3) {
+            await _createMedStoreRelationalTables(db);
+          }
+          await _enableForeignKeys(db);
+        },
+        onOpen: (db) async {
+          await _enableForeignKeys(db);
         },
       );
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint(
+        'HealthDatabase.initialize FAILED (using memory store): $e\n$st',
+      );
       _useMemoryStore = true;
     }
   }
@@ -493,6 +719,1003 @@ CREATE TABLE IF NOT EXISTS app_kv (
     final db = await database;
     return db.query('doctor_master', orderBy: 'id DESC');
   }
+
+  // --- Medical store relational schema (accounts, products, invoices, etc.) ---
+
+  static String _medNowIso() => DateTime.now().toIso8601String();
+
+  // Accounts
+  Future<int> insertMedAccount(Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      final t = _medNowIso();
+      row['created_at'] = row['created_at'] ?? t;
+      row['updated_at'] = row['updated_at'] ?? t;
+      return db.insert('accounts', row);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> updateMedAccount(int id, Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      row['updated_at'] = _medNowIso();
+      return db.update('accounts', row, where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedAccount(int id) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete('accounts', where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<List<Map<String, Object?>>> fetchMedAccounts() async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      return db.query('accounts', orderBy: 'id DESC');
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<Map<String, Object?>?> fetchMedAccountById(int id) async {
+    if (!hasPersistentSql) return null;
+    try {
+      final db = _db!;
+      final rows = await db.query(
+        'accounts',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      return rows.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Products
+  Future<int> insertMedProduct(Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      final t = _medNowIso();
+      row['created_at'] = row['created_at'] ?? t;
+      row['updated_at'] = row['updated_at'] ?? t;
+      return db.insert('products', row);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> updateMedProduct(int id, Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      row['updated_at'] = _medNowIso();
+      return db.update('products', row, where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedProduct(int id) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete('products', where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<List<Map<String, Object?>>> fetchMedProducts() async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      return db.query('products', orderBy: 'id DESC');
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<Map<String, Object?>?> fetchMedProductById(int id) async {
+    if (!hasPersistentSql) return null;
+    try {
+      final db = _db!;
+      final rows = await db.query(
+        'products',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      return rows.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Sales invoices
+  Future<int> insertMedSalesInvoice(Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      final t = _medNowIso();
+      row['created_at'] = row['created_at'] ?? t;
+      row['updated_at'] = row['updated_at'] ?? t;
+      return db.insert('sales_invoices', row);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> updateMedSalesInvoice(int id, Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      row['updated_at'] = _medNowIso();
+      return db.update('sales_invoices', row, where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedSalesInvoice(int id) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete('sales_invoices', where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<List<Map<String, Object?>>> fetchMedSalesInvoices() async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      return db.query('sales_invoices', orderBy: 'id DESC');
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<Map<String, Object?>?> fetchMedSalesInvoiceById(int id) async {
+    if (!hasPersistentSql) return null;
+    try {
+      final db = _db!;
+      final rows = await db.query(
+        'sales_invoices',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      return rows.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Sales invoice line items
+  Future<int> insertMedSalesInvoiceItem(Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.insert('sales_invoice_items', values);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> updateMedSalesInvoiceItem(
+    int id,
+    Map<String, Object?> values,
+  ) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.update(
+        'sales_invoice_items',
+        values,
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedSalesInvoiceItem(int id) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete('sales_invoice_items', where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedSalesInvoiceItemsForInvoice(int invoiceId) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete(
+        'sales_invoice_items',
+        where: 'invoice_id = ?',
+        whereArgs: [invoiceId],
+      );
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<List<Map<String, Object?>>> fetchMedSalesInvoiceItems(
+    int invoiceId,
+  ) async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      return db.query(
+        'sales_invoice_items',
+        where: 'invoice_id = ?',
+        whereArgs: [invoiceId],
+        orderBy: 'line_no ASC',
+      );
+    } catch (_) {
+      return [];
+    }
+  }
+
+  // Purchases
+  Future<int> insertMedPurchase(Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      final t = _medNowIso();
+      row['created_at'] = row['created_at'] ?? t;
+      row['updated_at'] = row['updated_at'] ?? t;
+      return db.insert('purchases', row);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> updateMedPurchase(int id, Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      row['updated_at'] = _medNowIso();
+      return db.update('purchases', row, where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedPurchase(int id) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete('purchases', where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<List<Map<String, Object?>>> fetchMedPurchases() async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      return db.query('purchases', orderBy: 'id DESC');
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<Map<String, Object?>?> fetchMedPurchaseById(int id) async {
+    if (!hasPersistentSql) return null;
+    try {
+      final db = _db!;
+      final rows = await db.query(
+        'purchases',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      return rows.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Purchase line items
+  Future<int> insertMedPurchaseItem(Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.insert('purchase_items', values);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> updateMedPurchaseItem(int id, Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.update(
+        'purchase_items',
+        values,
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedPurchaseItem(int id) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete('purchase_items', where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedPurchaseItemsForPurchase(int purchaseId) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete(
+        'purchase_items',
+        where: 'purchase_id = ?',
+        whereArgs: [purchaseId],
+      );
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<List<Map<String, Object?>>> fetchMedPurchaseItems(
+    int purchaseId,
+  ) async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      return db.query(
+        'purchase_items',
+        where: 'purchase_id = ?',
+        whereArgs: [purchaseId],
+        orderBy: 'line_no ASC',
+      );
+    } catch (_) {
+      return [];
+    }
+  }
+
+  // Payments & receipts (entry_type: 'payment' | 'receipt')
+  Future<int> insertMedPaymentReceipt(Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      final t = _medNowIso();
+      row['created_at'] = row['created_at'] ?? t;
+      row['updated_at'] = row['updated_at'] ?? t;
+      return db.insert('payment_receipts', row);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> updateMedPaymentReceipt(
+    int id,
+    Map<String, Object?> values,
+  ) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      row['updated_at'] = _medNowIso();
+      return db.update(
+        'payment_receipts',
+        row,
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedPaymentReceipt(int id) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete('payment_receipts', where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<List<Map<String, Object?>>> fetchMedPaymentReceipts({
+    String? entryType,
+  }) async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      if (entryType != null && entryType.isNotEmpty) {
+        return db.query(
+          'payment_receipts',
+          where: 'entry_type = ?',
+          whereArgs: [entryType],
+          orderBy: 'voucher_date DESC, id DESC',
+        );
+      }
+      return db.query(
+        'payment_receipts',
+        orderBy: 'voucher_date DESC, id DESC',
+      );
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<Map<String, Object?>?> fetchMedPaymentReceiptById(int id) async {
+    if (!hasPersistentSql) return null;
+    try {
+      final db = _db!;
+      final rows = await db.query(
+        'payment_receipts',
+        where: 'id = ?',
+        whereArgs: [id],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      return rows.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Settings (key/value; complements app_kv for structured store prefs)
+  Future<void> upsertMedSetting(String key, String value) async {
+    if (!hasPersistentSql) return;
+    try {
+      final db = _db!;
+      await db.insert('business_settings', {
+        'k': key,
+        'v': value,
+        'updated_at': _medNowIso(),
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    } catch (_) {}
+  }
+
+  Future<String?> fetchMedSetting(String key) async {
+    if (!hasPersistentSql) return null;
+    try {
+      final db = _db!;
+      final rows = await db.query(
+        'business_settings',
+        where: 'k = ?',
+        whereArgs: [key],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      return rows.first['v'] as String?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<List<Map<String, Object?>>> fetchMedSettingsAll() async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      return db.query('business_settings', orderBy: 'k ASC');
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<int> deleteMedSetting(String key) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete('business_settings', where: 'k = ?', whereArgs: [key]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  // Daily closing
+  Future<int> insertMedDailyClosing(Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      final t = _medNowIso();
+      row['created_at'] = row['created_at'] ?? t;
+      row['updated_at'] = row['updated_at'] ?? t;
+      return db.insert('daily_closing', row);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> updateMedDailyClosing(int id, Map<String, Object?> values) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      row['updated_at'] = _medNowIso();
+      return db.update('daily_closing', row, where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<int> deleteMedDailyClosing(int id) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      return db.delete('daily_closing', where: 'id = ?', whereArgs: [id]);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<List<Map<String, Object?>>> fetchMedDailyClosings() async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      return db.query('daily_closing', orderBy: 'closing_date DESC');
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<Map<String, Object?>?> fetchMedDailyClosingByDate(
+    String closingDate,
+  ) async {
+    if (!hasPersistentSql) return null;
+    try {
+      final db = _db!;
+      final rows = await db.query(
+        'daily_closing',
+        where: 'closing_date = ?',
+        whereArgs: [closingDate],
+        limit: 1,
+      );
+      if (rows.isEmpty) return null;
+      return rows.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static double _medParseDouble(dynamic v) {
+    if (v is num) return v.toDouble();
+    return double.tryParse(v.toString().trim()) ?? 0;
+  }
+
+  /// Adjusts `products.stock` by [delta] (use negative for sales deduction).
+  Future<void> medApplyProductStockDelta(int productId, double delta) async {
+    if (!hasPersistentSql) return;
+    try {
+      final db = _db!;
+      await db.rawUpdate(
+        'UPDATE products SET stock = COALESCE(stock, 0) + ?, updated_at = ? WHERE id = ?',
+        [delta, _medNowIso(), productId],
+      );
+    } catch (_) {}
+  }
+
+  /// Upserts [accounts] row aligned with app account master (same primary [id]).
+  Future<void> upsertMedAccountFromAppRow(Map<String, dynamic> row) async {
+    if (!hasPersistentSql) return;
+    final id = row['id'];
+    if (id is! int) return;
+    try {
+      final db = _db!;
+      final a1 = (row['address1'] ?? '').toString().trim();
+      final a2 = (row['address2'] ?? '').toString().trim();
+      final addr = [a1, a2].where((s) => s.isNotEmpty).join(', ');
+      final now = _medNowIso();
+      await db.insert('accounts', {
+        'id': id,
+        'name': (row['name'] ?? '').toString(),
+        'mobile': (row['mobile'] ?? '').toString(),
+        'city': (row['city'] ?? '').toString(),
+        'gst': (row['gst'] ?? '').toString(),
+        'address': addr,
+        'account_type': (row['accountType'] ?? 'Customer').toString(),
+        'opening_balance': _medParseDouble(row['openingBalance']),
+        'created_at': now,
+        'updated_at': now,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    } catch (_) {}
+  }
+
+  /// Upserts [products] row aligned with app product master (same primary [id]).
+  Future<void> upsertMedProductFromAppRow(Map<String, dynamic> row) async {
+    if (!hasPersistentSql) return;
+    final id = row['id'];
+    if (id is! int) return;
+    try {
+      final db = _db!;
+      final now = _medNowIso();
+      await db.insert('products', {
+        'id': id,
+        'name': (row['name'] ?? '').toString(),
+        'barcode': (row['barcode'] ?? '').toString(),
+        'hsn': (row['hsn'] ?? '').toString(),
+        'mrp': _medParseDouble(row['mrp']),
+        'sale_rate': _medParseDouble(row['saleRate'] ?? row['wRate']),
+        'stock': _medParseDouble(row['stock']),
+        'reorder_level': _medParseDouble(row['reorderQty'] ?? row['minStock']),
+        'expiry_date': (row['expiryDate'] ?? '').toString(),
+        'created_at': now,
+        'updated_at': now,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
+    } catch (_) {}
+  }
+
+  /// Replaces header + lines for sales invoice [doc] (same [id] as JSON doc).
+  Future<void> replaceMedSalesInvoiceFromDocument(
+    Map<String, dynamic> doc,
+  ) async {
+    if (!hasPersistentSql) return;
+    final id = doc['id'];
+    if (id is! int) return;
+    try {
+      final db = _db!;
+      final now = _medNowIso();
+      await db.transaction((txn) async {
+        await txn.delete('sales_invoices', where: 'id = ?', whereArgs: [id]);
+        await txn.insert('sales_invoices', {
+          'id': id,
+          'bill_no': (doc['billNo'] ?? '').toString(),
+          'series': (doc['series'] ?? '').toString(),
+          'invoice_date': (doc['date'] ?? '').toString(),
+          'party_name': (doc['party'] ?? '').toString(),
+          'account_id': doc['accountId'] as int?,
+          'doctor': (doc['doctor'] ?? '').toString(),
+          'patient': (doc['patient'] ?? '').toString(),
+          'subtotal': _medParseDouble(doc['subTotal']),
+          'discount_percent': _medParseDouble(doc['discountPercent']),
+          'discount_amount': _medParseDouble(doc['discountAmount']),
+          'scheme_discount': _medParseDouble(doc['schemeDiscount']),
+          'sgst': _medParseDouble(doc['sgst']),
+          'cgst': _medParseDouble(doc['cgst']),
+          'igst': _medParseDouble(doc['igst']),
+          'round_off': _medParseDouble(doc['roundOff']),
+          'grand_total': _medParseDouble(doc['grandTotal']),
+          'notes': (doc['module'] ?? '').toString(),
+          'created_at': now,
+          'updated_at': now,
+        });
+        final rawItems = (doc['items'] as List?) ?? [];
+        var line = 0;
+        for (final x in rawItems) {
+          if (x is! Map) continue;
+          final it = Map<String, dynamic>.from(x);
+          line++;
+          final sr = int.tryParse('${it['sr'] ?? line}') ?? line;
+          final pid = it['productId'];
+          await txn.insert('sales_invoice_items', {
+            'invoice_id': id,
+            'line_no': sr,
+            'product_id': pid is int ? pid : null,
+            'product_name': (it['productName'] ?? '').toString(),
+            'pack': (it['pack'] ?? '').toString(),
+            'batch': (it['batch'] ?? '').toString(),
+            'expiry': (it['expiry'] ?? '').toString(),
+            'qty': _medParseDouble(it['qty']),
+            'free_qty': _medParseDouble(it['free']),
+            'rate': _medParseDouble(it['rate']),
+            'gst_percent': _medParseDouble(it['gstPercent']),
+            'amount': _medParseDouble(
+              it['amount'] ??
+                  (_medParseDouble(it['qty']) * _medParseDouble(it['rate'])),
+            ),
+          });
+        }
+      });
+    } catch (e, st) {
+      debugPrint('replaceMedSalesInvoiceFromDocument: $e\n$st');
+      rethrow;
+    }
+  }
+
+  /// Replaces header + lines for purchase [doc] (same [id] as JSON doc).
+  Future<void> replaceMedPurchaseFromDocument(Map<String, dynamic> doc) async {
+    if (!hasPersistentSql) return;
+    final id = doc['id'];
+    if (id is! int) return;
+    try {
+      final db = _db!;
+      final now = _medNowIso();
+      await db.transaction((txn) async {
+        await txn.delete('purchases', where: 'id = ?', whereArgs: [id]);
+        await txn.insert('purchases', {
+          'id': id,
+          'bill_no': (doc['billNo'] ?? '').toString(),
+          'series': (doc['series'] ?? '').toString(),
+          'purchase_date': (doc['date'] ?? '').toString(),
+          'party_name': (doc['party'] ?? '').toString(),
+          'supplier_account_id': doc['accountId'] as int?,
+          'subtotal': _medParseDouble(doc['subTotal']),
+          'discount_amount': _medParseDouble(doc['discountAmount']),
+          'scheme_discount': _medParseDouble(doc['schemeDiscount']),
+          'sgst': _medParseDouble(doc['sgst']),
+          'cgst': _medParseDouble(doc['cgst']),
+          'igst': _medParseDouble(doc['igst']),
+          'round_off': _medParseDouble(doc['roundOff']),
+          'grand_total': _medParseDouble(doc['grandTotal']),
+          'notes': (doc['module'] ?? '').toString(),
+          'created_at': now,
+          'updated_at': now,
+        });
+        final rawItems = (doc['items'] as List?) ?? [];
+        var line = 0;
+        for (final x in rawItems) {
+          if (x is! Map) continue;
+          final it = Map<String, dynamic>.from(x);
+          line++;
+          final sr = int.tryParse('${it['sr'] ?? line}') ?? line;
+          final pid = it['productId'];
+          await txn.insert('purchase_items', {
+            'purchase_id': id,
+            'line_no': sr,
+            'product_id': pid is int ? pid : null,
+            'product_name': (it['productName'] ?? '').toString(),
+            'pack': (it['pack'] ?? '').toString(),
+            'batch': (it['batch'] ?? '').toString(),
+            'expiry': (it['expiry'] ?? '').toString(),
+            'qty': _medParseDouble(it['qty']),
+            'free_qty': _medParseDouble(it['free']),
+            'rate': _medParseDouble(it['rate']),
+            'gst_percent': _medParseDouble(it['gstPercent']),
+            'amount': _medParseDouble(
+              it['amount'] ??
+                  (_medParseDouble(it['qty']) * _medParseDouble(it['rate'])),
+            ),
+          });
+        }
+      });
+    } catch (e, st) {
+      debugPrint('replaceMedPurchaseFromDocument: $e\n$st');
+      rethrow;
+    }
+  }
+
+  /// Upsert payment / receipt row (used by Account module sync).
+  Future<void> upsertMedPaymentReceiptRow(Map<String, Object?> values) async {
+    if (!hasPersistentSql) return;
+    try {
+      final db = _db!;
+      final row = Map<String, Object?>.from(values);
+      final t = _medNowIso();
+      row['created_at'] = row['created_at'] ?? t;
+      row['updated_at'] = row['updated_at'] ?? t;
+      await db.insert(
+        'payment_receipts',
+        row,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    } catch (_) {}
+  }
+
+  Future<double> medSqlSumSalesForAccount({
+    required int accountId,
+    required String partyNameLower,
+  }) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final rows = await db.rawQuery(
+        r'''
+SELECT COALESCE(SUM(grand_total), 0) AS t FROM sales_invoices
+WHERE account_id = ? OR (account_id IS NULL AND lower(trim(party_name)) = ?)
+''',
+        [accountId, partyNameLower.trim().toLowerCase()],
+      );
+      return _medParseDouble(rows.first['t']);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<double> medSqlSumPurchasesForAccount({
+    required int accountId,
+    required String partyNameLower,
+  }) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final rows = await db.rawQuery(
+        r'''
+SELECT COALESCE(SUM(grand_total), 0) AS t FROM purchases
+WHERE supplier_account_id = ? OR (supplier_account_id IS NULL AND lower(trim(party_name)) = ?)
+''',
+        [accountId, partyNameLower.trim().toLowerCase()],
+      );
+      return _medParseDouble(rows.first['t']);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<double> medSqlSumReceiptsForAccount(int accountId) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final rows = await db.rawQuery(
+        r'''
+SELECT COALESCE(SUM(amount), 0) AS t FROM payment_receipts
+WHERE entry_type = 'receipt' AND account_id = ?
+''',
+        [accountId],
+      );
+      return _medParseDouble(rows.first['t']);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<double> medSqlSumPaymentsForAccount(int accountId) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final rows = await db.rawQuery(
+        r'''
+SELECT COALESCE(SUM(amount), 0) AS t FROM payment_receipts
+WHERE entry_type = 'payment' AND account_id = ?
+''',
+        [accountId],
+      );
+      return _medParseDouble(rows.first['t']);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<double> medSqlSumSalesOnDate(String yyyyMmDd) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final rows = await db.rawQuery(
+        r'''
+SELECT COALESCE(SUM(grand_total), 0) AS t FROM sales_invoices
+WHERE invoice_date = ?
+''',
+        [yyyyMmDd],
+      );
+      return _medParseDouble(rows.first['t']);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<double> medSqlSumPurchasesOnDate(String yyyyMmDd) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final rows = await db.rawQuery(
+        r'''
+SELECT COALESCE(SUM(grand_total), 0) AS t FROM purchases
+WHERE purchase_date = ?
+''',
+        [yyyyMmDd],
+      );
+      return _medParseDouble(rows.first['t']);
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// Top lines by qty from relational invoice items.
+  Future<List<Map<String, Object?>>> medSqlTopSellingProducts({
+    int limit = 5,
+  }) async {
+    if (!hasPersistentSql) return [];
+    try {
+      final db = _db!;
+      return db.rawQuery(
+        r'''
+SELECT product_name AS name, SUM(qty + free_qty) AS qty
+FROM sales_invoice_items
+GROUP BY product_id, product_name
+ORDER BY qty DESC
+LIMIT ?
+''',
+        [limit],
+      );
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<Map<String, Object?>?> medSqlBestCustomerBySales() async {
+    if (!hasPersistentSql) return null;
+    try {
+      final db = _db!;
+      final rows = await db.rawQuery(r'''
+SELECT MAX(party_name) AS name, SUM(grand_total) AS total
+FROM sales_invoices
+GROUP BY lower(trim(party_name))
+ORDER BY total DESC
+LIMIT 1
+''');
+      if (rows.isEmpty) return null;
+      return rows.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<int> medSqlLowStockSkuCount() async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final rows = await db.rawQuery(r'''
+SELECT COUNT(*) AS c FROM products
+WHERE IFNULL(reorder_level, 0) > 0 AND stock <= reorder_level
+''');
+      final v = rows.first['c'];
+      if (v is int) return v;
+      return int.tryParse(v?.toString() ?? '0') ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// [expiry_date] stored as ISO YYYY-MM-DD or longer; counted if within window from today.
+  Future<int> medSqlNearExpirySkuCount({int withinDays = 45}) async {
+    if (!hasPersistentSql) return 0;
+    try {
+      final db = _db!;
+      final rows = await db.rawQuery(
+        '''
+SELECT COUNT(*) AS c FROM products
+WHERE expiry_date IS NOT NULL AND length(trim(expiry_date)) >= 10
+AND date(substr(expiry_date, 1, 10)) >= date('now')
+AND date(substr(expiry_date, 1, 10)) <= date('now', ?)
+''',
+        ['+$withinDays days'],
+      );
+      final v = rows.first['c'];
+      if (v is int) return v;
+      return int.tryParse(v?.toString() ?? '0') ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -503,7 +1726,62 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Health+',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(scaffoldBackgroundColor: const Color(0xFFF6F2C2)),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: AppUi.primary,
+          brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: AppUi.surfaceAlt,
+        inputDecorationTheme: InputDecorationTheme(
+          isDense: true,
+          filled: true,
+          fillColor: AppUi.surface,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 11,
+            vertical: 10,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppUi.radius),
+            borderSide: const BorderSide(color: AppUi.border),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppUi.radius),
+            borderSide: const BorderSide(color: AppUi.border),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppUi.radius),
+            borderSide: const BorderSide(color: AppUi.primary, width: 1.5),
+          ),
+          labelStyle: const TextStyle(fontSize: 12.5, color: AppUi.textSoft),
+          hintStyle: const TextStyle(fontSize: 12, color: AppUi.textSoft),
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppUi.radius),
+            ),
+            textStyle: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(AppUi.radius),
+            ),
+            side: const BorderSide(color: AppUi.border),
+            textStyle: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ),
       home: const HomePage(),
     );
   }
@@ -557,6 +1835,7 @@ class _HomePageState extends State<HomePage> {
   bool _showCrDrNotePrint = false;
   String? _activeAccountModule;
   String? _placeholderMasterTitle;
+
   /// Top menu: Special / Periodical / Utility / Printers / ActiveWork / Infoserver.
   String? _appModuleGroup;
   String? _appModuleItem;
@@ -577,8 +1856,17 @@ class _HomePageState extends State<HomePage> {
   double _todaySales = 0;
   int _pendingBills = 0;
   double _totalPurchase = 0;
+  double _todayPurchase = 0;
+  double _totalPendingReceivable = 0;
   int _lowStockCount = 0;
   double _todayRevenue = 0;
+  List<Map<String, dynamic>> _topSellingProducts = const [];
+  String _bestCustomer = '-';
+  int _nearExpiryCount = 0;
+  String _topPendingParty = '-';
+  double _topPendingAmount = 0;
+  final TextEditingController _globalSearchController = TextEditingController();
+  final FocusNode _globalSearchFocus = FocusNode();
 
   static const Map<String, List<String>> _taskbarSubMenuItems = {
     'Master': ['Product Master', 'Company Master', 'Patient Master'],
@@ -609,12 +1897,7 @@ class _HomePageState extends State<HomePage> {
       'Backup & Restore',
       'Daily Closing',
     ],
-    'Utility': [
-      'Import / Export Data',
-      'Backup',
-      'Restore',
-      'Store Settings',
-    ],
+    'Utility': ['Import / Export Data', 'Backup', 'Restore', 'Store Settings'],
   };
 
   @override
@@ -972,6 +2255,11 @@ class _HomePageState extends State<HomePage> {
     }
 
     final todayKey = DateTime.now().toIso8601String().split('T').first;
+    double parseNum(dynamic value) {
+      if (value is num) return value.toDouble();
+      return double.tryParse(value.toString().trim()) ?? 0;
+    }
+
     double totalSales = 0;
     double totalPurchase = 0;
     double todayRevenue = 0;
@@ -989,6 +2277,13 @@ class _HomePageState extends State<HomePage> {
       totalPurchase += (row['grandTotal'] as num?)?.toDouble() ?? 0;
     }
 
+    double todayPurchaseJson = 0;
+    for (final row in purchaseBillRecords) {
+      if ((row['date'] ?? '').toString() == todayKey) {
+        todayPurchaseJson += (row['grandTotal'] as num?)?.toDouble() ?? 0;
+      }
+    }
+
     final lowStock = products.where((product) {
       final stock = double.tryParse((product['stock'] ?? '0').toString()) ?? 0;
       final reorder =
@@ -998,6 +2293,112 @@ class _HomePageState extends State<HomePage> {
           0;
       return reorder > 0 && stock <= reorder;
     }).length;
+    final productSalesQty = <String, double>{};
+    final customerTotals = <String, double>{};
+    for (final inv in salesInvoiceRecords) {
+      final customer = (inv['party'] ?? '').toString().trim();
+      customerTotals[customer] =
+          (customerTotals[customer] ?? 0) + parseNum(inv['grandTotal']);
+      final rawItems = (inv['items'] as List?) ?? const [];
+      for (final item in rawItems) {
+        if (item is! Map) continue;
+        final row = Map<String, dynamic>.from(item);
+        final productName = (row['productName'] ?? '').toString().trim();
+        if (productName.isEmpty) continue;
+        final soldQty = parseNum(row['qty']) + parseNum(row['free']);
+        productSalesQty[productName] =
+            (productSalesQty[productName] ?? 0) + soldQty;
+      }
+    }
+    final topProducts = productSalesQty.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final top3Products = topProducts
+        .take(3)
+        .map((e) => <String, dynamic>{'name': e.key, 'qty': e.value})
+        .toList();
+    final sortedCustomers = customerTotals.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final bestCustomer = sortedCustomers.isEmpty
+        ? '-'
+        : sortedCustomers.first.key;
+    int nearExpiryCount = 0;
+    final now = DateTime.now();
+    final expiryWindow = now.add(const Duration(days: 45));
+    for (final p in products) {
+      final expiryRaw = (p['expiryDate'] ?? p['expiry'] ?? '')
+          .toString()
+          .trim();
+      final expiry = DateTime.tryParse(expiryRaw);
+      if (expiry == null) continue;
+      if (expiry.isAfter(now.subtract(const Duration(days: 1))) &&
+          expiry.isBefore(expiryWindow.add(const Duration(days: 1)))) {
+        nearExpiryCount++;
+      }
+    }
+    final receiptByParty = <String, double>{};
+    for (final r
+        in accountModuleRecords['Receipt'] ?? const <Map<String, dynamic>>[]) {
+      final party = (r['account'] ?? '').toString().trim().toLowerCase();
+      if (party.isEmpty) continue;
+      receiptByParty[party] =
+          (receiptByParty[party] ?? 0) + parseNum(r['amount']);
+    }
+    String topPendingParty = '-';
+    double topPendingAmount = 0;
+    for (final e in customerTotals.entries) {
+      final key = e.key.trim().toLowerCase();
+      if (key.isEmpty) continue;
+      final pending = e.value - (receiptByParty[key] ?? 0);
+      if (pending > topPendingAmount) {
+        topPendingAmount = pending;
+        topPendingParty = e.key;
+      }
+    }
+
+    double dq(dynamic v) {
+      if (v is num) return v.toDouble();
+      return double.tryParse(v?.toString() ?? '0') ?? 0;
+    }
+
+    var todayRevenueFinal = todayRevenue;
+    var todayPurchase = todayPurchaseJson;
+    var top3Final = top3Products;
+    var bestCustomerFinal = bestCustomer;
+    var lowStockFinal = lowStock;
+    var nearExpiryFinal = nearExpiryCount;
+    double totalPendingRecv = await medTotalCustomerPendingReceivableSql();
+
+    final sqlDb = HealthDatabase.instance;
+    if (sqlDb.hasPersistentSql) {
+      final sqlTodaySales = await sqlDb.medSqlSumSalesOnDate(todayKey);
+      todayRevenueFinal = sqlTodaySales > 0.0001 ? sqlTodaySales : todayRevenue;
+      final sqlTodayPur = await sqlDb.medSqlSumPurchasesOnDate(todayKey);
+      todayPurchase = sqlTodayPur > 0.0001 ? sqlTodayPur : todayPurchaseJson;
+
+      final sqlTop = await sqlDb.medSqlTopSellingProducts(limit: 3);
+      if (sqlTop.isNotEmpty) {
+        top3Final = sqlTop
+            .map(
+              (r) => <String, dynamic>{'name': r['name'], 'qty': dq(r['qty'])},
+            )
+            .toList();
+      }
+      final sqlBest = await sqlDb.medSqlBestCustomerBySales();
+      if (sqlBest != null) {
+        final n = (sqlBest['name'] ?? '').toString().trim();
+        if (n.isNotEmpty) {
+          bestCustomerFinal = n;
+        }
+      }
+      final lsSql = await sqlDb.medSqlLowStockSkuCount();
+      lowStockFinal = lsSql > lowStock ? lsSql : lowStock;
+      final neSql = await sqlDb.medSqlNearExpirySkuCount(withinDays: 45);
+      nearExpiryFinal = neSql > nearExpiryCount ? neSql : nearExpiryCount;
+    }
+
+    if (!mounted) {
+      return;
+    }
 
     setState(() {
       _totalAccounts = accounts.length;
@@ -1005,15 +2406,95 @@ class _HomePageState extends State<HomePage> {
       _todaySales = totalSales;
       _pendingBills = salesInvoiceRecords.length;
       _totalPurchase = totalPurchase;
-      _lowStockCount = lowStock;
-      _todayRevenue = todayRevenue;
+      _todayPurchase = todayPurchase;
+      _totalPendingReceivable = totalPendingRecv;
+      _lowStockCount = lowStockFinal;
+      _todayRevenue = todayRevenueFinal;
+      _topSellingProducts = top3Final;
+      _bestCustomer = bestCustomerFinal;
+      _nearExpiryCount = nearExpiryFinal;
+      _topPendingParty = topPendingParty;
+      _topPendingAmount = topPendingAmount;
     });
   }
 
   @override
   void dispose() {
+    _globalSearchController.dispose();
+    _globalSearchFocus.dispose();
     closeTimer.cancel();
     super.dispose();
+  }
+
+  List<Map<String, String>> _globalSearchMatches(String query) {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return const [];
+    final out = <Map<String, String>>[];
+    for (final p in products) {
+      final name = (p['name'] ?? '').toString();
+      final barcode = (p['barcode'] ?? '').toString();
+      final stock = (p['stock'] ?? '0').toString();
+      if (name.toLowerCase().contains(q) || barcode.toLowerCase().contains(q)) {
+        out.add({
+          'type': 'Product',
+          'title': name,
+          'subtitle':
+              'Stock: $stock  •  Barcode: ${barcode.isEmpty ? '-' : barcode}',
+          'route': 'product',
+        });
+      }
+      if (out.length >= 8) break;
+    }
+    for (final c in accounts) {
+      final name = (c['name'] ?? '').toString();
+      final mobile = (c['mobile'] ?? '').toString();
+      if (name.toLowerCase().contains(q) || mobile.toLowerCase().contains(q)) {
+        out.add({
+          'type': 'Customer',
+          'title': name,
+          'subtitle': 'Mobile: ${mobile.isEmpty ? '-' : mobile}',
+          'route': 'account',
+        });
+      }
+      if (out.length >= 16) break;
+    }
+    for (final inv in salesInvoiceRecords) {
+      final billNo = (inv['billNo'] ?? '').toString();
+      final party = (inv['party'] ?? '').toString();
+      final date = (inv['date'] ?? '').toString();
+      if (billNo.toLowerCase().contains(q) || party.toLowerCase().contains(q)) {
+        out.add({
+          'type': 'Invoice',
+          'title': 'Sales #$billNo',
+          'subtitle': '$party  •  $date',
+          'route': 'sales-invoice',
+        });
+      }
+      if (out.length >= 24) break;
+    }
+    for (final inv in purchaseBillRecords) {
+      final billNo = (inv['billNo'] ?? '').toString();
+      final party = (inv['party'] ?? '').toString();
+      final date = (inv['date'] ?? '').toString();
+      if (billNo.toLowerCase().contains(q) || party.toLowerCase().contains(q)) {
+        out.add({
+          'type': 'Invoice',
+          'title': 'Purchase #$billNo',
+          'subtitle': '$party  •  $date',
+          'route': 'purchase-bill',
+        });
+      }
+      if (out.length >= 30) break;
+    }
+    return out;
+  }
+
+  void _openGlobalSearchResult(Map<String, String> result) {
+    final route = result['route'] ?? '';
+    if (route.isEmpty) return;
+    _openScreen(route);
+    _globalSearchController.clear();
+    _showShortcutSnackbar('Search → ${result['title'] ?? route}');
   }
 
   void _scheduleClose() {
@@ -1277,7 +2758,9 @@ class _HomePageState extends State<HomePage> {
           LogicalKeyboardKey.f1,
           control: true,
           shift: true,
-        ): _OpenMenuShortcutIntent('other_issue_receipt'),
+        ): _OpenMenuShortcutIntent(
+          'other_issue_receipt',
+        ),
         const SingleActivator(LogicalKeyboardKey.f4, control: true):
             _OpenMenuShortcutIntent('currency_reconciliation'),
         const SingleActivator(LogicalKeyboardKey.keyL, control: true):
@@ -1374,6 +2857,10 @@ class _HomePageState extends State<HomePage> {
                       onMenuHoverEnter: _onMenuHoverEnter,
                       onMenuHoverExit: _onMenuHoverExit,
                       onMenuPositionChanged: _onMenuPositionChanged,
+                      searchController: _globalSearchController,
+                      searchFocusNode: _globalSearchFocus,
+                      searchOptionsBuilder: _globalSearchMatches,
+                      onSearchSelected: _openGlobalSearchResult,
                     ),
                     ShortcutBar(
                       activeMenu: activeTaskbarMenu,
@@ -1652,8 +3139,15 @@ class _HomePageState extends State<HomePage> {
                               todaySales: _todaySales,
                               pendingBills: _pendingBills,
                               totalPurchase: _totalPurchase,
+                              todayPurchase: _todayPurchase,
+                              totalPendingReceivable: _totalPendingReceivable,
                               lowStock: _lowStockCount,
                               todayRevenue: _todayRevenue,
+                              topSellingProducts: _topSellingProducts,
+                              bestCustomer: _bestCustomer,
+                              nearExpiryCount: _nearExpiryCount,
+                              topPendingParty: _topPendingParty,
+                              topPendingAmount: _topPendingAmount,
                               recentActivity: appActivityLog,
                               onAddAccount: () {
                                 _openScreen('account');
@@ -1870,6 +3364,10 @@ class MenuBar extends StatefulWidget {
   final Function(String) onMenuHoverEnter;
   final VoidCallback onMenuHoverExit;
   final Function(String, double) onMenuPositionChanged;
+  final TextEditingController searchController;
+  final FocusNode searchFocusNode;
+  final List<Map<String, String>> Function(String query) searchOptionsBuilder;
+  final ValueChanged<Map<String, String>> onSearchSelected;
 
   const MenuBar({
     super.key,
@@ -1877,6 +3375,10 @@ class MenuBar extends StatefulWidget {
     required this.onMenuHoverEnter,
     required this.onMenuHoverExit,
     required this.onMenuPositionChanged,
+    required this.searchController,
+    required this.searchFocusNode,
+    required this.searchOptionsBuilder,
+    required this.onSearchSelected,
   });
 
   @override
@@ -1918,6 +3420,135 @@ class _MenuBarState extends State<MenuBar> {
           _menuItem('Infoserver'),
           _menuItem('Exit'),
           const Spacer(),
+          SizedBox(
+            width: 360,
+            child: RawAutocomplete<Map<String, String>>(
+              textEditingController: widget.searchController,
+              focusNode: widget.searchFocusNode,
+              optionsBuilder: (value) {
+                if (value.text.trim().isEmpty) {
+                  return const Iterable<Map<String, String>>.empty();
+                }
+                return widget.searchOptionsBuilder(value.text);
+              },
+              displayStringForOption: (option) => option['title'] ?? '',
+              onSelected: widget.onSearchSelected,
+              optionsViewBuilder: (context, onSelected, options) {
+                final q = widget.searchController.text.trim().toLowerCase();
+                return Align(
+                  alignment: Alignment.topRight,
+                  child: Material(
+                    elevation: 6,
+                    borderRadius: BorderRadius.circular(10),
+                    child: SizedBox(
+                      width: 360,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 260),
+                        child: ListView.builder(
+                          padding: EdgeInsets.zero,
+                          itemCount: options.length,
+                          itemBuilder: (context, index) {
+                            final option = options.elementAt(index);
+                            final title = option['title'] ?? '';
+                            final subtitle = option['subtitle'] ?? '';
+                            final type = option['type'] ?? '';
+                            final titleLower = title.toLowerCase();
+                            final hit = q.isNotEmpty && titleLower.contains(q);
+                            return InkWell(
+                              onTap: () => onSelected(option),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 8,
+                                ),
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 7,
+                                        vertical: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFE2E8F0),
+                                        borderRadius: BorderRadius.circular(99),
+                                      ),
+                                      child: Text(
+                                        type,
+                                        style: const TextStyle(
+                                          fontSize: 10.5,
+                                          fontWeight: FontWeight.w700,
+                                          color: Color(0xFF334155),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            title,
+                                            style: TextStyle(
+                                              fontSize: 12.2,
+                                              fontWeight: hit
+                                                  ? FontWeight.w800
+                                                  : FontWeight.w600,
+                                              color: const Color(0xFF0F172A),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 1),
+                                          Text(
+                                            subtitle,
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              color: Color(0xFF64748B),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+              fieldViewBuilder: (context, controller, focusNode, onSubmitted) {
+                return SizedBox(
+                  height: 24,
+                  child: TextField(
+                    controller: controller,
+                    focusNode: focusNode,
+                    style: const TextStyle(fontSize: 11.5),
+                    decoration: InputDecoration(
+                      hintText: 'Global search: product, customer, invoice',
+                      prefixIcon: const Icon(Icons.search, size: 15),
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                      filled: true,
+                      fillColor: Colors.white,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(color: Colors.indigo.shade100),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        borderSide: BorderSide(color: Colors.indigo.shade100),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(width: 8),
         ],
       ),
     );
@@ -3665,13 +5296,13 @@ class _SubMenuButtonState extends State<SubMenuButton> {
     final bg = widget.isActive
         ? const Color(0xFFCCFBF1).withValues(alpha: 0.95)
         : isHovered
-            ? Colors.white
-            : const Color(0xFFF8FAFC);
+        ? Colors.white
+        : const Color(0xFFF8FAFC);
     final border = widget.isActive
         ? _DashUi.teal.withValues(alpha: 0.55)
         : isHovered
-            ? _DashUi.teal.withValues(alpha: 0.28)
-            : const Color(0xFFE2E8F0);
+        ? _DashUi.teal.withValues(alpha: 0.28)
+        : const Color(0xFFE2E8F0);
 
     return MouseRegion(
       cursor: SystemMouseCursors.click,
@@ -3717,7 +5348,9 @@ class _SubMenuButtonState extends State<SubMenuButton> {
                 widget.label,
                 style: TextStyle(
                   fontSize: 13,
-                  fontWeight: widget.isActive ? FontWeight.w700 : FontWeight.w600,
+                  fontWeight: widget.isActive
+                      ? FontWeight.w700
+                      : FontWeight.w600,
                   color: widget.isActive ? _DashUi.tealDeep : _DashUi.text,
                   letterSpacing: -0.1,
                 ),
@@ -4094,11 +5727,11 @@ abstract final class _DashUi {
   static const Color accentAmber = Color(0xFFFB923C);
 
   static TextStyle sectionTitle() => const TextStyle(
-        fontSize: 12.5,
-        fontWeight: FontWeight.w800,
-        color: text,
-        letterSpacing: 1.0,
-      );
+    fontSize: 12.5,
+    fontWeight: FontWeight.w800,
+    color: text,
+    letterSpacing: 1.0,
+  );
 }
 
 /// Very light medical cross grid — stronger toward the right to balance empty space.
@@ -4119,16 +5752,19 @@ class _MedicalWatermarkPainter extends CustomPainter {
       }
     }
     final soft = Paint()
-      ..shader = RadialGradient(
-        colors: [
-          const Color(0xFF38BDF8).withValues(alpha: 0.06),
-          Colors.transparent,
-        ],
-        stops: const [0.0, 1.0],
-      ).createShader(Rect.fromCircle(
-        center: Offset(size.width * 0.88, size.height * 0.22),
-        radius: size.shortestSide * 0.55,
-      ));
+      ..shader =
+          RadialGradient(
+            colors: [
+              const Color(0xFF38BDF8).withValues(alpha: 0.06),
+              Colors.transparent,
+            ],
+            stops: const [0.0, 1.0],
+          ).createShader(
+            Rect.fromCircle(
+              center: Offset(size.width * 0.88, size.height * 0.22),
+              radius: size.shortestSide * 0.55,
+            ),
+          );
     canvas.drawRect(Offset.zero & size, soft);
   }
 
@@ -4142,8 +5778,15 @@ class HomeCenterContent extends StatelessWidget {
   final double todaySales;
   final int pendingBills;
   final double totalPurchase;
+  final double todayPurchase;
+  final double totalPendingReceivable;
   final int lowStock;
   final double todayRevenue;
+  final List<Map<String, dynamic>> topSellingProducts;
+  final String bestCustomer;
+  final int nearExpiryCount;
+  final String topPendingParty;
+  final double topPendingAmount;
   final List<Map<String, dynamic>> recentActivity;
   final VoidCallback onAddAccount;
   final VoidCallback onAddProduct;
@@ -4158,8 +5801,15 @@ class HomeCenterContent extends StatelessWidget {
     required this.todaySales,
     required this.pendingBills,
     required this.totalPurchase,
+    required this.todayPurchase,
+    required this.totalPendingReceivable,
     required this.lowStock,
     required this.todayRevenue,
+    required this.topSellingProducts,
+    required this.bestCustomer,
+    required this.nearExpiryCount,
+    required this.topPendingParty,
+    required this.topPendingAmount,
     required this.recentActivity,
     required this.onAddAccount,
     required this.onAddProduct,
@@ -4232,9 +5882,9 @@ class HomeCenterContent extends StatelessWidget {
                           width: 268,
                           child: _HomeMetricCard(
                             icon: Icons.shopping_cart_rounded,
-                            title: 'Total purchase',
-                            subtitle: 'Recorded purchase bills',
-                            value: '₹ ${totalPurchase.toStringAsFixed(0)}',
+                            title: "Today's purchase",
+                            subtitle: 'Purchase bills dated today',
+                            value: '₹ ${todayPurchase.toStringAsFixed(0)}',
                             iconBg: _DashUi.blue,
                           ),
                         ),
@@ -4242,9 +5892,10 @@ class HomeCenterContent extends StatelessWidget {
                           width: 268,
                           child: _HomeMetricCard(
                             icon: Icons.pending_actions_rounded,
-                            title: 'Pending payments',
-                            subtitle: 'Open invoices in register',
-                            value: '$pendingBills',
+                            title: 'Total pending',
+                            subtitle: 'Customer receivables (ledger)',
+                            value:
+                                '₹ ${totalPendingReceivable.toStringAsFixed(0)}',
                             iconBg: _DashUi.accentAmber,
                             accentWarm: true,
                           ),
@@ -4255,13 +5906,17 @@ class HomeCenterContent extends StatelessWidget {
                             icon: Icons.inventory_rounded,
                             title: 'Stock alerts',
                             subtitle: 'At or below reorder level',
-                            value: lowStock == 0 ? 'All clear' : '$lowStock SKUs',
+                            value: lowStock == 0
+                                ? 'All clear'
+                                : '$lowStock SKUs',
                             iconBg: _DashUi.tealDeep,
                             valueBadge: lowStock > 0
                                 ? Icon(
                                     Icons.priority_high_rounded,
                                     size: 18,
-                                    color: _DashUi.accentAmber.withValues(alpha: 0.9),
+                                    color: _DashUi.accentAmber.withValues(
+                                      alpha: 0.9,
+                                    ),
                                   )
                                 : null,
                           ),
@@ -4272,7 +5927,9 @@ class HomeCenterContent extends StatelessWidget {
                     Align(
                       alignment: Alignment.centerRight,
                       child: Text(
-                        'Lifetime sales recorded: ₹ ${todaySales.toStringAsFixed(0)}',
+                        'Lifetime sales: ₹ ${todaySales.toStringAsFixed(0)}  ·  '
+                        'Lifetime purchase: ₹ ${totalPurchase.toStringAsFixed(0)}  ·  '
+                        'Invoices: $pendingBills',
                         style: TextStyle(
                           fontSize: 11,
                           color: _DashUi.textSoft,
@@ -4340,6 +5997,200 @@ class HomeCenterContent extends StatelessWidget {
                           value: '$pendingBills',
                         ),
                       ],
+                    ),
+                    const SizedBox(height: 26),
+                    Text(
+                      'BUSINESS INTELLIGENCE',
+                      style: _DashUi.sectionTitle(),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: _SectionCard(
+                            title: 'Top Selling Products',
+                            subtitle: 'Based on invoice quantity movement',
+                            child: topSellingProducts.isEmpty
+                                ? const Text(
+                                    'No sales yet. Top products will appear here.',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Color(0xFF64748B),
+                                    ),
+                                  )
+                                : Column(
+                                    children: topSellingProducts
+                                        .map(
+                                          (row) => Padding(
+                                            padding: const EdgeInsets.only(
+                                              bottom: 8,
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                Expanded(
+                                                  child: Text(
+                                                    (row['name'] ?? '-')
+                                                        .toString(),
+                                                    style: const TextStyle(
+                                                      fontSize: 12.5,
+                                                      fontWeight:
+                                                          FontWeight.w600,
+                                                      color: Color(0xFF1E293B),
+                                                    ),
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Container(
+                                                  padding:
+                                                      const EdgeInsets.symmetric(
+                                                        horizontal: 8,
+                                                        vertical: 3,
+                                                      ),
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(
+                                                      0xFFE0F2FE,
+                                                    ),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          99,
+                                                        ),
+                                                  ),
+                                                  child: Text(
+                                                    '${(row['qty'] as num?)?.toStringAsFixed(0) ?? '0'} qty',
+                                                    style: const TextStyle(
+                                                      fontSize: 11,
+                                                      fontWeight:
+                                                          FontWeight.w700,
+                                                      color: Color(0xFF0C4A6E),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        )
+                                        .toList(),
+                                  ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        SizedBox(
+                          width: 300,
+                          child: _SectionCard(
+                            title: 'Best Customer',
+                            subtitle: 'Highest billing contribution',
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 36,
+                                  height: 36,
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFDBEAFE),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: const Icon(
+                                    Icons.emoji_events_rounded,
+                                    size: 20,
+                                    color: Color(0xFF1D4ED8),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    bestCustomer.isEmpty ? '-' : bestCustomer,
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF1E293B),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 26),
+                    Text('REMINDERS', style: _DashUi.sectionTitle()),
+                    const SizedBox(height: 10),
+                    _SectionCard(
+                      title: 'Operational Alerts',
+                      subtitle: 'Payment dues and expiry signals',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.notifications_active_rounded,
+                                size: 17,
+                                color: Color(0xFFB45309),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  nearExpiryCount == 0
+                                      ? 'No near-expiry medicine alerts.'
+                                      : '$nearExpiryCount medicines expiring soon.',
+                                  style: const TextStyle(
+                                    fontSize: 12.3,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF92400E),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.inventory_2_rounded,
+                                size: 17,
+                                color: Color(0xFFB91C1C),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  lowStock == 0
+                                      ? 'Stock levels are above reorder points.'
+                                      : '$lowStock SKUs at or below reorder — restock soon.',
+                                  style: const TextStyle(
+                                    fontSize: 12.3,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF991B1B),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.account_balance_wallet_rounded,
+                                size: 17,
+                                color: Color(0xFFB91C1C),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  topPendingAmount <= 0
+                                      ? 'No pending payment reminders.'
+                                      : '₹ ${topPendingAmount.toStringAsFixed(0)} pending from $topPendingParty.',
+                                  style: const TextStyle(
+                                    fontSize: 12.3,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFF991B1B),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
                     const SizedBox(height: 26),
                     Text('RECENT ACTIVITY', style: _DashUi.sectionTitle()),
@@ -4539,7 +6390,9 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
                 spreadRadius: _hover ? 0 : -1,
               ),
               BoxShadow(
-                color: const Color(0xFF0F172A).withValues(alpha: _hover ? 0.09 : 0.05),
+                color: const Color(
+                  0xFF0F172A,
+                ).withValues(alpha: _hover ? 0.09 : 0.05),
                 blurRadius: _hover ? 22 : 14,
                 offset: const Offset(0, 6),
               ),
@@ -4555,10 +6408,7 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
                       gradient: LinearGradient(
                         begin: Alignment.topRight,
                         end: Alignment.bottomLeft,
-                        colors: [
-                          warmTint,
-                          Colors.transparent,
-                        ],
+                        colors: [warmTint, Colors.transparent],
                       ),
                     ),
                   ),
@@ -4684,7 +6534,9 @@ class _HomeQuickTileState extends State<_HomeQuickTile> {
               ),
               boxShadow: [
                 BoxShadow(
-                  color: widget.colors.first.withValues(alpha: _hover ? 0.5 : 0.36),
+                  color: widget.colors.first.withValues(
+                    alpha: _hover ? 0.5 : 0.36,
+                  ),
                   blurRadius: _hover ? 26 : 18,
                   offset: Offset(0, _hover ? 14 : 9),
                   spreadRadius: _hover ? -1 : -2,
@@ -4971,18 +6823,42 @@ class _GenericMasterScreenState extends State<GenericMasterScreen> {
     final List<String> selectedProducts = _selectedProductIndexes
         .map((i) => _products[i])
         .toList();
+    if (selectedProducts.isEmpty && productController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Select at least one product'),
+          duration: Duration(milliseconds: 900),
+        ),
+      );
+      return;
+    }
 
     setState(() {
-      generics.add({
-        'id': _genericSeed++,
-        'name': nameController.text.trim(),
-        'shortName': shortNameController.text.trim(),
-        'remarks': remarksController.text.trim(),
-        'schedule': _schedule,
-        'product': productController.text.trim(),
-        'products': selectedProducts,
-      });
-      _selectedRecordIndex = generics.length - 1;
+      if (_selectedRecordIndex != null &&
+          _selectedRecordIndex! >= 0 &&
+          _selectedRecordIndex! < generics.length) {
+        final existing = generics[_selectedRecordIndex!];
+        generics[_selectedRecordIndex!] = {
+          ...existing,
+          'name': nameController.text.trim(),
+          'shortName': shortNameController.text.trim(),
+          'remarks': remarksController.text.trim(),
+          'schedule': _schedule,
+          'product': productController.text.trim(),
+          'products': selectedProducts,
+        };
+      } else {
+        generics.add({
+          'id': _genericSeed++,
+          'name': nameController.text.trim(),
+          'shortName': shortNameController.text.trim(),
+          'remarks': remarksController.text.trim(),
+          'schedule': _schedule,
+          'product': productController.text.trim(),
+          'products': selectedProducts,
+        });
+        _selectedRecordIndex = generics.length - 1;
+      }
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -5006,14 +6882,21 @@ class _GenericMasterScreenState extends State<GenericMasterScreen> {
     focusName.requestFocus();
   }
 
-  void _deleteLast() {
-    if (generics.isEmpty) {
+  void _deleteSelected() {
+    if (_selectedRecordIndex == null ||
+        _selectedRecordIndex! < 0 ||
+        _selectedRecordIndex! >= generics.length) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Select a row to delete'),
+          duration: Duration(milliseconds: 900),
+        ),
+      );
       return;
     }
-
     setState(() {
-      generics.removeLast();
-      _selectedRecordIndex = generics.isEmpty ? null : generics.length - 1;
+      generics.removeAt(_selectedRecordIndex!);
+      _selectedRecordIndex = null;
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -5024,18 +6907,19 @@ class _GenericMasterScreenState extends State<GenericMasterScreen> {
     );
   }
 
-  void _editSample() {
-    setState(() {
-      nameController.text = 'AN AYURVEDIC PROP';
-      shortNameController.text = 'AN AYURVEDIC';
-      remarksController.text = 'Sample generic remarks';
-      _schedule = '(none)';
-      productController.text = 'HEPASAFE SYP. 200 ML';
-      _selectedProductIndexes
-        ..clear()
-        ..add(0)
-        ..add(1);
-    });
+  void _editSelected() {
+    if (_selectedRecordIndex == null ||
+        _selectedRecordIndex! < 0 ||
+        _selectedRecordIndex! >= generics.length) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Select a row to edit'),
+          duration: Duration(milliseconds: 900),
+        ),
+      );
+      return;
+    }
+    _loadRecord(_selectedRecordIndex!);
   }
 
   void _loadRecord(int index) {
@@ -5060,16 +6944,22 @@ class _GenericMasterScreenState extends State<GenericMasterScreen> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xFFF1F1F1),
+      color: Theme.of(context).colorScheme.surface,
       child: Column(
         children: [
           GenericMasterHeaderBar(onBack: widget.onClose),
           Expanded(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                SizedBox(
-                  width: 380,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final compact = constraints.maxWidth < 700;
+                final leftWidth = compact
+                    ? constraints.maxWidth - 16
+                    : (constraints.maxWidth * 0.70).clamp(
+                        320.0,
+                        constraints.maxWidth - 132,
+                      );
+                final leftPane = SizedBox(
+                  width: leftWidth.isFinite ? leftWidth : null,
                   child: Column(
                     children: [
                       Expanded(
@@ -5181,12 +7071,13 @@ class _GenericMasterScreenState extends State<GenericMasterScreen> {
                       ),
                     ],
                   ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
+                );
+                final centerPane = Expanded(
                   child: Container(
                     decoration: BoxDecoration(
-                      color: const Color(0xFFF6F2F2),
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surfaceContainerLowest,
                       border: Border(
                         left: BorderSide(color: Colors.grey.shade300),
                       ),
@@ -5201,18 +7092,41 @@ class _GenericMasterScreenState extends State<GenericMasterScreen> {
                       ),
                     ),
                   ),
-                ),
-                SizedBox(
+                );
+                final actionPane = SizedBox(
                   width: 120,
                   child: GenericMasterActionPanel(
-                    onEdit: _editSample,
-                    onDelete: _deleteLast,
+                    onEdit: _editSelected,
+                    onDelete: _deleteSelected,
                     onSave: _saveRecord,
                     onClear: _clearForm,
                     saveFocusNode: focusSave,
                   ),
-                ),
-              ],
+                );
+                if (compact) {
+                  return Column(
+                    children: [
+                      Expanded(child: leftPane),
+                      SizedBox(
+                        height: 100,
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: actionPane,
+                        ),
+                      ),
+                    ],
+                  );
+                }
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    leftPane,
+                    const SizedBox(width: 8),
+                    centerPane,
+                    actionPane,
+                  ],
+                );
+              },
             ),
           ),
         ],
@@ -5369,7 +7283,7 @@ class GenericMasterHeaderBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
-          colors: [Color(0xFFB0302D), Color(0xFF8B2FA1), Color(0xFF4A4FB5)],
+          colors: [AppUi.primary, AppUi.teal, Color(0xFF0EA5E9)],
           begin: Alignment.centerLeft,
           end: Alignment.centerRight,
         ),
@@ -5429,13 +7343,13 @@ class _MasterActionButtonState extends State<MasterActionButton> {
   Color get _resolvedAccent {
     switch (widget.label.toLowerCase()) {
       case 'save':
-        return const Color(0xFF15803D);
+        return AppUi.success;
       case 'delete':
-        return const Color(0xFFDC2626);
+        return AppUi.danger;
       case 'edit':
-        return const Color(0xFF2563EB);
+        return AppUi.primary;
       case 'clear':
-        return const Color(0xFF64748B);
+        return AppUi.textSoft;
       default:
         return widget.accentColor;
     }
@@ -5480,7 +7394,7 @@ class _MasterActionButtonState extends State<MasterActionButton> {
                     : _resolvedAccent.withValues(alpha: 0.24),
               ),
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(9),
+                borderRadius: BorderRadius.circular(AppUi.radius),
               ),
               splashFactory: InkRipple.splashFactory,
             ),
@@ -5510,7 +7424,7 @@ class GenericMasterActionPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xFFF1F1F1),
+      color: Theme.of(context).colorScheme.surface,
       padding: const EdgeInsets.fromLTRB(8, 10, 20, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
@@ -11573,12 +13487,14 @@ class _TableValueText extends StatelessWidget {
 
 class _SectionCard extends StatelessWidget {
   final String title;
+  final String? subtitle;
   final Widget child;
   final EdgeInsets contentPadding;
   final bool expandChild;
 
   const _SectionCard({
     required this.title,
+    this.subtitle,
     required this.child,
     this.contentPadding = const EdgeInsets.fromLTRB(12, 10, 12, 12),
     this.expandChild = false,
@@ -11587,31 +13503,194 @@ class _SectionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      elevation: 1.8,
-      shadowColor: const Color(0xFF0F172A).withValues(alpha: 0.10),
-      color: const Color(0xFFFEFEFF),
+      elevation: 1.4,
+      shadowColor: const Color(0xFF0F172A).withValues(alpha: 0.08),
+      color: AppUi.surface,
       margin: EdgeInsets.zero,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
-        side: const BorderSide(color: Color(0xFFE2E8F0)),
+        borderRadius: BorderRadius.circular(AppUi.radius),
+        side: const BorderSide(color: AppUi.border),
       ),
       child: Padding(
         padding: contentPadding,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-                color: Color(0xFF1E293B),
-                letterSpacing: 0.2,
-              ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final isBoundedHeight = constraints.maxHeight.isFinite;
+            final sectionBody = expandChild
+                ? child
+                : SingleChildScrollView(primary: false, child: child);
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: AppUi.text,
+                              letterSpacing: 0.2,
+                            ),
+                          ),
+                          if (subtitle != null &&
+                              subtitle!.trim().isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              subtitle!,
+                              style: const TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w500,
+                                color: AppUi.textSoft,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Container(height: 1, color: AppUi.border),
+                const SizedBox(height: 10),
+                if (expandChild || isBoundedHeight)
+                  Flexible(child: sectionBody)
+                else
+                  sectionBody,
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _ModuleMeta {
+  final IconData icon;
+  final String subtitle;
+  const _ModuleMeta({required this.icon, required this.subtitle});
+}
+
+_ModuleMeta _moduleMeta(String title) {
+  final t = title.toLowerCase();
+  if (t.contains('sales')) {
+    return const _ModuleMeta(
+      icon: Icons.receipt_long_rounded,
+      subtitle: 'Create invoices and manage billing entries',
+    );
+  }
+  if (t.contains('purchase')) {
+    return const _ModuleMeta(
+      icon: Icons.shopping_cart_checkout_rounded,
+      subtitle: 'Capture supplier bills and inward stock',
+    );
+  }
+  if (t.contains('gst')) {
+    return const _ModuleMeta(
+      icon: Icons.calculate_rounded,
+      subtitle: 'Tax computation and return-oriented summaries',
+    );
+  }
+  if (t.contains('stock')) {
+    return const _ModuleMeta(
+      icon: Icons.inventory_2_rounded,
+      subtitle: 'Track product movement and inventory levels',
+    );
+  }
+  if (t.contains('account')) {
+    return const _ModuleMeta(
+      icon: Icons.account_balance_wallet_rounded,
+      subtitle: 'Maintain ledgers, balances, and payment flows',
+    );
+  }
+  if (t.contains('doctor')) {
+    return const _ModuleMeta(
+      icon: Icons.medical_services_rounded,
+      subtitle: 'Doctor profiles, links, and commission controls',
+    );
+  }
+  if (t.contains('patient')) {
+    return const _ModuleMeta(
+      icon: Icons.personal_injury_rounded,
+      subtitle: 'Patient profile and treatment-ready details',
+    );
+  }
+  if (t.contains('user')) {
+    return const _ModuleMeta(
+      icon: Icons.manage_accounts_rounded,
+      subtitle: 'User access and administration settings',
+    );
+  }
+  return const _ModuleMeta(
+    icon: Icons.dashboard_rounded,
+    subtitle: 'Professional data-entry and reporting workspace',
+  );
+}
+
+class _HeaderActionButton extends StatefulWidget {
+  final String label;
+  final IconData icon;
+  final Color color;
+  final VoidCallback onPressed;
+
+  const _HeaderActionButton({
+    required this.label,
+    required this.icon,
+    required this.color,
+    required this.onPressed,
+  });
+
+  @override
+  State<_HeaderActionButton> createState() => _HeaderActionButtonState();
+}
+
+class _HeaderActionButtonState extends State<_HeaderActionButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      cursor: SystemMouseCursors.click,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: widget.onPressed,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: _hover
+                ? widget.color.withValues(alpha: 0.12)
+                : Colors.white.withValues(alpha: 0.16),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: _hover
+                  ? widget.color.withValues(alpha: 0.45)
+                  : Colors.white.withValues(alpha: 0.28),
             ),
-            const SizedBox(height: 10),
-            if (expandChild) Flexible(child: child) else child,
-          ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(widget.icon, size: 14, color: Colors.white),
+              const SizedBox(width: 6),
+              Text(
+                widget.label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -11643,17 +13722,29 @@ class _MasterCrudLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final meta = _moduleMeta(title);
+    void showActionMessage(String text) {
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      messenger?.hideCurrentSnackBar();
+      messenger?.showSnackBar(
+        SnackBar(
+          content: Text(text),
+          duration: const Duration(milliseconds: 900),
+        ),
+      );
+    }
+
     return Container(
-      color: const Color(0xFFF8FAFC),
+      color: AppUi.surfaceAlt,
       child: Column(
         children: [
           Container(
-            height: 32,
+            height: 56,
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 12),
             decoration: BoxDecoration(
               gradient: const LinearGradient(
-                colors: [Color(0xFF4F46E5), Color(0xFF6366F1), Color(0xFF0EA5E9)],
+                colors: [AppUi.primary, Color(0xFF3B82F6), AppUi.teal],
                 begin: Alignment.centerLeft,
                 end: Alignment.centerRight,
               ),
@@ -11667,18 +13758,66 @@ class _MasterCrudLayout extends StatelessWidget {
             ),
             child: Row(
               children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Icon(meta.icon, color: Colors.white, size: 18),
+                ),
+                const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    title,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 30 / 2.2,
-                      fontWeight: FontWeight.w700,
-                      height: 1.0,
-                      letterSpacing: 0.2,
-                    ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          height: 1.0,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        meta.subtitle,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.86),
+                          fontSize: 11.2,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
                   ),
                 ),
+                _HeaderActionButton(
+                  label: 'Export',
+                  icon: Icons.file_download_outlined,
+                  color: const Color(0xFF0EA5E9),
+                  onPressed: () => showActionMessage('Export requested'),
+                ),
+                const SizedBox(width: 8),
+                _HeaderActionButton(
+                  label: 'Print',
+                  icon: Icons.print_outlined,
+                  color: const Color(0xFF22C55E),
+                  onPressed: () => showActionMessage('Print requested'),
+                ),
+                const SizedBox(width: 8),
+                _HeaderActionButton(
+                  label: 'Refresh',
+                  icon: Icons.refresh_rounded,
+                  color: const Color(0xFFF59E0B),
+                  onPressed: () => showActionMessage('View refreshed'),
+                ),
+                const SizedBox(width: 6),
                 if (onClose != null)
                   InkWell(
                     onTap: onClose,
@@ -11709,7 +13848,14 @@ class _MasterCrudLayout extends StatelessWidget {
                           Expanded(
                             child: SingleChildScrollView(
                               padding: const EdgeInsets.fromLTRB(10, 12, 10, 8),
-                              child: formChild,
+                              child: formChild is _SectionCard
+                                  ? formChild
+                                  : _SectionCard(
+                                      title: 'Filters / Input',
+                                      subtitle:
+                                          'Refine, enter and validate module inputs before save',
+                                      child: formChild,
+                                    ),
                             ),
                           ),
                           Container(
@@ -11727,7 +13873,12 @@ class _MasterCrudLayout extends StatelessWidget {
                         padding: const EdgeInsets.fromLTRB(8, 12, 16, 10),
                         child: _SectionCard(
                           title: 'Actions',
-                          contentPadding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                          contentPadding: const EdgeInsets.fromLTRB(
+                            10,
+                            10,
+                            10,
+                            10,
+                          ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
@@ -11864,24 +14015,27 @@ Widget _compactInput({
       keyboardType: keyboardType,
       textInputAction: textInputAction,
       onSubmitted: onSubmitted,
-      style: const TextStyle(fontSize: 12.5, color: Color(0xFF0F172A)),
+      style: const TextStyle(fontSize: 12.5, color: AppUi.text),
       decoration: InputDecoration(
         isDense: true,
         hintText: hintText,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 11,
+          vertical: 10,
+        ),
         filled: true,
-        fillColor: Colors.white,
+        fillColor: AppUi.surface,
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFFCBD5E1), width: 1),
+          borderRadius: BorderRadius.circular(AppUi.radius),
+          borderSide: const BorderSide(color: AppUi.border, width: 1),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFFCBD5E1), width: 1),
+          borderRadius: BorderRadius.circular(AppUi.radius),
+          borderSide: const BorderSide(color: AppUi.border, width: 1),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFF6366F1), width: 1.6),
+          borderRadius: BorderRadius.circular(AppUi.radius),
+          borderSide: const BorderSide(color: AppUi.primary, width: 1.6),
         ),
       ),
     ),
@@ -11906,18 +14060,18 @@ Widget _compactDropdown({
         isDense: true,
         contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
         filled: true,
-        fillColor: Colors.white,
+        fillColor: AppUi.surface,
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFFCBD5E1), width: 1),
+          borderRadius: BorderRadius.circular(AppUi.radius),
+          borderSide: const BorderSide(color: AppUi.border, width: 1),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: Color(0xFFCBD5E1), width: 1),
+          borderRadius: BorderRadius.circular(AppUi.radius),
+          borderSide: const BorderSide(color: AppUi.border, width: 1),
         ),
         focusedBorder: const OutlineInputBorder(
-          borderRadius: BorderRadius.all(Radius.circular(10)),
-          borderSide: BorderSide(color: Color(0xFF6366F1), width: 1.6),
+          borderRadius: BorderRadius.all(Radius.circular(AppUi.radius)),
+          borderSide: BorderSide(color: AppUi.primary, width: 1.6),
         ),
       ),
       items: values
@@ -12008,9 +14162,9 @@ class _SimpleTableState extends State<_SimpleTable> {
     final filteredIndexes = _filteredRowIndexes();
     return Container(
       decoration: BoxDecoration(
-        color: const Color(0xFFFCFDFF),
-        border: Border.all(color: const Color(0xFFD7DEEA)),
-        borderRadius: BorderRadius.circular(12),
+        color: AppUi.surface,
+        border: Border.all(color: AppUi.border),
+        borderRadius: BorderRadius.circular(AppUi.radius),
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
@@ -12028,9 +14182,9 @@ class _SimpleTableState extends State<_SimpleTable> {
                 height: controlsHeight,
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFF3F6FB),
+                  color: const Color(0xFFF1F5F9),
                   borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(12),
+                    top: Radius.circular(AppUi.radius),
                   ),
                   border: Border(
                     bottom: BorderSide(color: Colors.blueGrey.shade100),
@@ -12115,7 +14269,7 @@ class _SimpleTableState extends State<_SimpleTable> {
               ),
               Container(
                 height: headerHeight,
-                color: const Color(0xFFE8EDF7),
+                color: AppUi.primarySoft,
                 child: Row(
                   children: widget.headers
                       .map((h) => _SimpleTableHeaderCell(text: h, flex: 1))
@@ -12124,42 +14278,46 @@ class _SimpleTableState extends State<_SimpleTable> {
               ),
               SizedBox(
                 height: listHeight,
-                child: ListView.builder(
-                  itemCount: filteredIndexes.length,
-                  itemBuilder: (context, index) {
-                    final actualIndex = filteredIndexes[index];
-                    final row = widget.rows[actualIndex];
-                    final selected = widget.selectedIndex == actualIndex;
-                    final hovered = _hoveredIndex == actualIndex;
-                    final baseColor = index.isEven
-                        ? const Color(0xFFFFFFFF)
-                        : const Color(0xFFF8FAFC);
-                    return MouseRegion(
-                      onEnter: (_) =>
-                          setState(() => _hoveredIndex = actualIndex),
-                      onExit: (_) => setState(() => _hoveredIndex = null),
-                      child: InkWell(
-                        onTap: () => widget.onRowTap(actualIndex),
-                        child: Container(
-                          height: 28,
-                          color: selected
-                              ? const Color(0xFFDDE8FF)
-                              : hovered
-                              ? const Color(0xFFEFF6FF)
-                              : baseColor,
-                          child: Row(
-                            children: row
-                                .map(
-                                  (v) =>
-                                      _SimpleTableValueCell(text: v, flex: 1),
-                                )
-                                .toList(),
-                          ),
-                        ),
+                child: filteredIndexes.isEmpty
+                    ? const _NoDataPanel(message: 'No data available')
+                    : ListView.builder(
+                        itemCount: filteredIndexes.length,
+                        itemBuilder: (context, index) {
+                          final actualIndex = filteredIndexes[index];
+                          final row = widget.rows[actualIndex];
+                          final selected = widget.selectedIndex == actualIndex;
+                          final hovered = _hoveredIndex == actualIndex;
+                          final baseColor = index.isEven
+                              ? AppUi.surface
+                              : const Color(0xFFF8FAFC);
+                          return MouseRegion(
+                            onEnter: (_) =>
+                                setState(() => _hoveredIndex = actualIndex),
+                            onExit: (_) => setState(() => _hoveredIndex = null),
+                            child: InkWell(
+                              onTap: () => widget.onRowTap(actualIndex),
+                              child: Container(
+                                height: 30,
+                                color: selected
+                                    ? const Color(0xFFDDE8FF)
+                                    : hovered
+                                    ? const Color(0xFFEFF6FF)
+                                    : baseColor,
+                                child: Row(
+                                  children: row
+                                      .map(
+                                        (v) => _SimpleTableValueCell(
+                                          text: v,
+                                          flex: 1,
+                                        ),
+                                      )
+                                      .toList(),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
                       ),
-                    );
-                  },
-                ),
               ),
             ],
           );
@@ -13054,37 +15212,6 @@ class _InvoicePrintScreenState extends State<InvoicePrintScreen> {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocus = FocusNode();
 
-  final List<Map<String, dynamic>> _allInvoices = [
-    {
-      'invoiceNo': 'INV-1001',
-      'customer': 'Aarav Pharma',
-      'date': DateTime(2026, 4, 2),
-      'amount': 1850.75,
-      'status': 'Paid',
-    },
-    {
-      'invoiceNo': 'INV-1002',
-      'customer': 'MediCare Plus',
-      'date': DateTime(2026, 4, 4),
-      'amount': 920.20,
-      'status': 'Pending',
-    },
-    {
-      'invoiceNo': 'INV-1003',
-      'customer': 'Krishna Clinic',
-      'date': DateTime(2026, 4, 8),
-      'amount': 3140.00,
-      'status': 'Paid',
-    },
-    {
-      'invoiceNo': 'INV-1004',
-      'customer': 'Health First',
-      'date': DateTime(2026, 4, 10),
-      'amount': 1265.50,
-      'status': 'Partial',
-    },
-  ];
-
   List<Map<String, dynamic>> _filteredInvoices = [];
   DateTime? _fromDate;
   DateTime? _toDate;
@@ -13093,10 +15220,40 @@ class _InvoicePrintScreenState extends State<InvoicePrintScreen> {
   int? _hoveredIndex;
   bool _isLoading = false;
 
+  List<Map<String, dynamic>> get _allInvoices =>
+      salesInvoiceRecords.map((r) {
+        final dateText = (r['date'] ?? '').toString();
+        final parsedDate = DateTime.tryParse(dateText) ?? DateTime.now();
+        return <String, dynamic>{
+          'invoiceNo': (r['billNo'] ?? r['id'] ?? '').toString(),
+          'customer': (r['party'] ?? '').toString(),
+          'date': parsedDate,
+          'amount': _tmParseDouble(r['grandTotal']),
+          'status': _tmParseDouble(r['grandTotal']) > 0 ? 'Generated' : 'Draft',
+          'sourceDoc': Map<String, dynamic>.from(r),
+        };
+      }).toList()..sort(
+        (a, b) => (b['date'] as DateTime).compareTo(a['date'] as DateTime),
+      );
+
   List<String> get _customers => [
     'All',
     ..._allInvoices.map((e) => e['customer'].toString()).toSet(),
   ];
+
+  String _currencySymbol() {
+    final c = (globalMedicalStoreSettings['currency'] ?? 'INR')
+        .toString()
+        .toUpperCase();
+    switch (c) {
+      case 'USD':
+        return r'$';
+      case 'EUR':
+        return 'EUR';
+      default:
+        return '₹';
+    }
+  }
 
   @override
   void initState() {
@@ -13192,6 +15349,10 @@ class _InvoicePrintScreenState extends State<InvoicePrintScreen> {
   }
 
   void _previewInvoice(Map<String, dynamic> row) {
+    final src = row['sourceDoc'] is Map<String, dynamic>
+        ? Map<String, dynamic>.from(row['sourceDoc'] as Map<String, dynamic>)
+        : <String, dynamic>{};
+    final items = (src['items'] as List?) ?? const [];
     showDialog<void>(
       context: context,
       builder: (dialogContext) {
@@ -13229,9 +15390,35 @@ class _InvoicePrintScreenState extends State<InvoicePrintScreen> {
                 _previewLine('Date', _fmtDate(row['date'] as DateTime)),
                 _previewLine(
                   'Total Amount',
-                  'Rs. ${(row['amount'] as double).toStringAsFixed(2)}',
+                  '${_currencySymbol()} ${(row['amount'] as double).toStringAsFixed(2)}',
                 ),
                 _previewLine('Status', row['status'].toString()),
+                if (items.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Items',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 6),
+                  SizedBox(
+                    height: 170,
+                    child: ListView.builder(
+                      itemCount: items.length,
+                      itemBuilder: (context, index) {
+                        final it = Map<String, dynamic>.from(
+                          items[index] as Map,
+                        );
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Text(
+                            '${it['productName'] ?? '-'} · Qty ${_tmParseDouble(it['qty']).toStringAsFixed(2)} · Rate ${_tmParseDouble(it['rate']).toStringAsFixed(2)}',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 Align(
                   alignment: Alignment.centerRight,
@@ -13271,12 +15458,39 @@ class _InvoicePrintScreenState extends State<InvoicePrintScreen> {
   }
 
   void _printInvoice(Map<String, dynamic> row) {
+    final src = row['sourceDoc'] is Map<String, dynamic>
+        ? Map<String, dynamic>.from(row['sourceDoc'] as Map<String, dynamic>)
+        : <String, dynamic>{};
+    final storeName =
+        (globalMedicalStoreSettings['storeName'] ?? 'Health+ Medical Store')
+            .toString();
+    final lines = <String>[
+      storeName,
+      'GST: ${(globalMedicalStoreSettings['gstNumber'] ?? '-').toString()}',
+      'Invoice: ${row['invoiceNo']}',
+      'Customer: ${row['customer']}',
+      'Date: ${_fmtDate(row['date'] as DateTime)}',
+      'Amount: ${_currencySymbol()} ${(row['amount'] as double).toStringAsFixed(2)}',
+      '',
+      'Items:',
+    ];
+    final items = (src['items'] as List?) ?? const [];
+    for (final raw in items) {
+      if (raw is! Map) continue;
+      final it = Map<String, dynamic>.from(raw);
+      lines.add(
+        '- ${it['productName'] ?? '-'} | Qty ${_tmParseDouble(it['qty']).toStringAsFixed(2)} | Rate ${_tmParseDouble(it['rate']).toStringAsFixed(2)}',
+      );
+    }
+    Clipboard.setData(ClipboardData(text: lines.join('\n')));
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          content: Text('Printing Invoice ${row['invoiceNo']}...'),
-          duration: const Duration(milliseconds: 900),
+          content: Text(
+            'Invoice ${row['invoiceNo']} prepared (PDF text copied).',
+          ),
+          duration: const Duration(milliseconds: 1100),
         ),
       );
   }
@@ -13547,7 +15761,7 @@ class _InvoicePrintScreenState extends State<InvoicePrintScreen> {
                                             Expanded(
                                               flex: 2,
                                               child: Text(
-                                                'Rs. ${(row['amount'] as double).toStringAsFixed(2)}',
+                                                '${_currencySymbol()} ${(row['amount'] as double).toStringAsFixed(2)}',
                                               ),
                                             ),
                                             Expanded(
@@ -14231,15 +16445,22 @@ class _NoDataPanel extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.inbox_outlined, size: 46, color: Colors.blueGrey.shade300),
-          const SizedBox(height: 8),
+          Icon(Icons.inbox_outlined, size: 46, color: const Color(0xFF94A3B8)),
+          const SizedBox(height: 10),
           Text(
-            message,
-            style: TextStyle(
+            message.isEmpty ? 'No data available' : message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
               fontSize: 13,
-              color: Colors.blueGrey.shade500,
-              fontWeight: FontWeight.w600,
+              color: AppUi.textSoft,
+              fontWeight: FontWeight.w700,
             ),
+          ),
+          const SizedBox(height: 3),
+          const Text(
+            'Try adjusting filters or adding data',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 11.2, color: AppUi.textSoft),
           ),
         ],
       ),
@@ -14285,8 +16506,13 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
 
   final List<Map<String, dynamic>> accountList = [];
   int? _selectedIndex;
-  final TextEditingController _accountSearchController = TextEditingController();
+  final TextEditingController _accountSearchController =
+      TextEditingController();
   String _accountLedgerType = 'Customer';
+
+  final Map<int, double> _ledgerByAccountId = {};
+  final Map<int, double> _pendingByAccountId = {};
+  bool _balanceLoading = false;
 
   final Map<String, FocusNode> _focusNodes = {
     'name': FocusNode(),
@@ -14375,6 +16601,47 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
     });
   }
 
+  Future<void> _refreshBalances() async {
+    if (!mounted) {
+      return;
+    }
+    setState(() => _balanceLoading = true);
+    final led = <int, double>{};
+    final pend = <int, double>{};
+    for (final a in List<Map<String, dynamic>>.from(accountList)) {
+      final id = a['id'] as int?;
+      if (id == null) continue;
+      try {
+        final br = await medAccountBalanceBreakdown(
+          Map<String, dynamic>.from(a),
+        );
+        led[id] = br['ledger'] ?? 0;
+        final type = (a['accountType'] ?? 'Customer').toString().toLowerCase();
+        final isSup =
+            type.contains('supplier') ||
+            type.contains('stockist') ||
+            type.contains('creditor');
+        pend[id] = isSup ? (br['pendingPay'] ?? 0) : (br['pendingRec'] ?? 0);
+      } catch (e, st) {
+        debugPrint('_refreshBalances id=$id: $e\n$st');
+        led[id] = 0;
+        pend[id] = 0;
+      }
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _ledgerByAccountId
+        ..clear()
+        ..addAll(led);
+      _pendingByAccountId
+        ..clear()
+        ..addAll(pend);
+      _balanceLoading = false;
+    });
+  }
+
   Future<void> _loadAccounts() async {
     setState(() {
       accountList
@@ -14382,8 +16649,7 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
         ..addAll(_sortAccounts(accounts, sortingType));
       _selectedIndex = null;
     });
-
-    return Future<void>.value();
+    await _refreshBalances();
   }
 
   @override
@@ -14478,6 +16744,14 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
 
   Future<void> _editAccount() async {
     if (_selectedIndex == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Select an account to edit'),
+            duration: Duration(milliseconds: 900),
+          ),
+        );
+      }
       return;
     }
     final selected = accountList[_selectedIndex!];
@@ -14546,6 +16820,14 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
 
   Future<void> _deleteAccount() async {
     if (_selectedIndex == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Select an account to delete'),
+            duration: Duration(milliseconds: 900),
+          ),
+        );
+      }
       return;
     }
 
@@ -14582,12 +16864,32 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
     setState(() {
       _selectedIndex = index;
       c('name').text = account['name'] ?? '';
+      c('shortName').text = account['shortName'] ?? '';
       c('mobile').text = account['mobile'] ?? '';
       c('city').text = account['city'] ?? '';
       c('gstin').text = account['gst'] ?? '';
       c('address1').text = account['address1'] ?? '';
+      c('address2').text = account['address2'] ?? '';
+      c('pin').text = account['pin'] ?? '';
+      c('keyPerson').text = account['keyPerson'] ?? '';
+      c('phone').text = account['phone'] ?? '';
+      c('email').text = account['email'] ?? '';
+      c('tinLst').text = account['tinLst'] ?? '';
+      c('cstReg').text = account['cstReg'] ?? '';
+      c('drugLic1').text = account['drugLic1'] ?? '';
+      c('drugLic2').text = account['drugLic2'] ?? '';
+      c('discount').text = account['discount'] ?? '';
+      c('phone2').text = account['phone2'] ?? '';
+      c('fax').text = account['fax'] ?? '';
+      c('pisCode').text = account['pisCode'] ?? '';
+      c('date1').text = account['date1'] ?? '';
+      c('date2').text = account['date2'] ?? '';
+      c('drugLic3').text = account['drugLic3'] ?? '';
+      c('drugLic4').text = account['drugLic4'] ?? '';
       final ob = account['openingBalance'];
-      c('openingBalance').text = ob is num ? ob.toString() : (ob?.toString() ?? '0');
+      c('openingBalance').text = ob is num
+          ? ob.toString()
+          : (ob?.toString() ?? '0');
       _accountLedgerType = (account['accountType'] ?? 'Customer').toString();
     });
   }
@@ -14604,7 +16906,9 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
 
   int? _selectedIndexInFilteredTable() {
     final filtered = _filteredAccountsForTable();
-    if (_selectedIndex == null || _selectedIndex! >= accountList.length) return null;
+    if (_selectedIndex == null || _selectedIndex! >= accountList.length) {
+      return null;
+    }
     final id = accountList[_selectedIndex!]['id'];
     final i = filtered.indexWhere((a) => a['id'] == id);
     return i >= 0 ? i : null;
@@ -14621,7 +16925,7 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xFFF1F1F1),
+      color: Theme.of(context).colorScheme.surface,
       child: Column(
         children: [
           AccountMasterHeaderBar(onBack: widget.onClose),
@@ -14644,7 +16948,8 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
                               controllers: _controllers,
                               focusNodes: _focusNodes,
                               accountLedgerType: _accountLedgerType,
-                              onLedgerTypeChanged: (v) => setState(() => _accountLedgerType = v),
+                              onLedgerTypeChanged: (v) =>
+                                  setState(() => _accountLedgerType = v),
                               onFinalSubmit: _saveAccount,
                             ),
                           ),
@@ -14662,7 +16967,9 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
                                 prefixIcon: const Icon(Icons.search, size: 18),
                                 border: OutlineInputBorder(
                                   borderRadius: BorderRadius.circular(6),
-                                  borderSide: BorderSide(color: Colors.grey.shade400),
+                                  borderSide: BorderSide(
+                                    color: Colors.grey.shade400,
+                                  ),
                                 ),
                               ),
                             ),
@@ -14671,6 +16978,9 @@ class _AccountMasterScreenState extends State<AccountMasterScreen> {
                             accountList: _filteredAccountsForTable(),
                             selectedIndex: _selectedIndexInFilteredTable(),
                             onRowTap: _selectAccountFromFilteredRow,
+                            ledgerByAccountId: _ledgerByAccountId,
+                            pendingByAccountId: _pendingByAccountId,
+                            balanceLoading: _balanceLoading,
                           ),
                         ],
                       ),
@@ -14709,7 +17019,7 @@ class AccountMasterHeaderBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
-          colors: [Color(0xFFB0302D), Color(0xFF8B2FA1), Color(0xFF4A4FB5)],
+          colors: [AppUi.primary, AppUi.teal, Color(0xFF0EA5E9)],
           begin: Alignment.centerLeft,
           end: Alignment.centerRight,
         ),
@@ -14781,7 +17091,11 @@ class AccountMasterFormPane extends StatelessWidget {
           children: [
             const Text(
               'Customer / supplier master',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF334155)),
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                fontSize: 13,
+                color: Color(0xFF334155),
+              ),
             ),
             const SizedBox(height: 10),
             FormRow(
@@ -14818,20 +17132,32 @@ class AccountMasterFormPane extends StatelessWidget {
                   decoration: InputDecoration(
                     isDense: true,
                     hintText: 'Full address',
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 6,
+                    ),
                     filled: true,
                     fillColor: Colors.white,
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(3),
-                      borderSide: BorderSide(color: Colors.grey.shade500, width: 0.8),
+                      borderSide: BorderSide(
+                        color: Colors.grey.shade500,
+                        width: 0.8,
+                      ),
                     ),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(3),
-                      borderSide: BorderSide(color: Colors.grey.shade500, width: 0.8),
+                      borderSide: BorderSide(
+                        color: Colors.grey.shade500,
+                        width: 0.8,
+                      ),
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(3),
-                      borderSide: BorderSide(color: Colors.blueGrey.shade400, width: 1),
+                      borderSide: BorderSide(
+                        color: Colors.blueGrey.shade400,
+                        width: 1,
+                      ),
                     ),
                   ),
                 ),
@@ -14865,17 +17191,29 @@ class AccountMasterFormPane extends StatelessWidget {
                   style: const TextStyle(fontSize: 12.5, color: Colors.black87),
                   decoration: InputDecoration(
                     isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 6,
+                    ),
                     filled: true,
                     fillColor: Colors.white,
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(3),
-                      borderSide: BorderSide(color: Colors.grey.shade500, width: 0.8),
+                      borderSide: BorderSide(
+                        color: Colors.grey.shade500,
+                        width: 0.8,
+                      ),
                     ),
                   ),
                   items: const [
-                    DropdownMenuItem(value: 'Customer', child: Text('Customer')),
-                    DropdownMenuItem(value: 'Supplier', child: Text('Supplier')),
+                    DropdownMenuItem(
+                      value: 'Customer',
+                      child: Text('Customer'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'Supplier',
+                      child: Text('Supplier'),
+                    ),
                   ],
                   onChanged: (v) {
                     if (v != null) onLedgerTypeChanged(v);
@@ -14937,12 +17275,18 @@ class AccountTableSection extends StatelessWidget {
   final List<Map<String, dynamic>> accountList;
   final int? selectedIndex;
   final ValueChanged<int> onRowTap;
+  final Map<int, double> ledgerByAccountId;
+  final Map<int, double> pendingByAccountId;
+  final bool balanceLoading;
 
   const AccountTableSection({
     super.key,
     required this.accountList,
     required this.selectedIndex,
     required this.onRowTap,
+    this.ledgerByAccountId = const {},
+    this.pendingByAccountId = const {},
+    this.balanceLoading = false,
   });
 
   @override
@@ -14951,21 +17295,25 @@ class AccountTableSection extends StatelessWidget {
       height: 200,
       margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
       decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border.all(color: Colors.grey.shade400),
+        color: AppUi.surface,
+        border: Border.all(color: AppUi.border),
+        borderRadius: BorderRadius.circular(8),
       ),
+      clipBehavior: Clip.antiAlias,
       child: Column(
         children: [
           Container(
             height: 28,
-            color: const Color(0xFFE8E8E8),
+            color: AppUi.surfaceAlt,
             child: const Row(
               children: [
-                _TableHeaderCell(text: 'Name', flex: 3),
+                _TableHeaderCell(text: 'Name', flex: 2),
                 _TableHeaderCell(text: 'Mobile', flex: 2),
                 _TableHeaderCell(text: 'Type', flex: 2),
                 _TableHeaderCell(text: 'GST', flex: 2),
                 _TableHeaderCell(text: 'Op.Bal', flex: 2),
+                _TableHeaderCell(text: 'Balance', flex: 2),
+                _TableHeaderCell(text: 'Pending', flex: 2),
               ],
             ),
           ),
@@ -14976,34 +17324,46 @@ class AccountTableSection extends StatelessWidget {
                 final account = accountList[index];
                 final bool isSelected = selectedIndex == index;
                 final ob = account['openingBalance'];
-                final obStr = ob is num ? ob.toStringAsFixed(2) : (double.tryParse(ob?.toString() ?? '0') ?? 0).toStringAsFixed(2);
+                final obStr = ob is num
+                    ? ob.toStringAsFixed(2)
+                    : (double.tryParse(ob?.toString() ?? '0') ?? 0)
+                          .toStringAsFixed(2);
+                final aid = account['id'] as int?;
+                final led = aid == null ? null : ledgerByAccountId[aid];
+                final pend = aid == null ? null : pendingByAccountId[aid];
+                final ledStr = balanceLoading && led == null
+                    ? '…'
+                    : (led?.toStringAsFixed(2) ?? '—');
+                final pendStr = balanceLoading && pend == null
+                    ? '…'
+                    : (pend?.toStringAsFixed(2) ?? '—');
                 return InkWell(
                   onTap: () => onRowTap(index),
                   child: Container(
                     height: 26,
-                    color: isSelected ? const Color(0xFFDDE8FF) : Colors.white,
+                    color: isSelected ? AppUi.primarySoft : AppUi.surface,
                     child: Row(
                       children: [
                         _TableValueCell(
                           text: (account['name'] ?? '').toString(),
-                          flex: 3,
+                          flex: 2,
                         ),
                         _TableValueCell(
                           text: (account['mobile'] ?? '').toString(),
                           flex: 2,
                         ),
                         _TableValueCell(
-                          text: (account['accountType'] ?? 'Customer').toString(),
+                          text: (account['accountType'] ?? 'Customer')
+                              .toString(),
                           flex: 2,
                         ),
                         _TableValueCell(
                           text: (account['gst'] ?? '').toString(),
                           flex: 2,
                         ),
-                        _TableValueCell(
-                          text: obStr,
-                          flex: 2,
-                        ),
+                        _TableValueCell(text: obStr, flex: 2),
+                        _TableValueCell(text: ledStr, flex: 2),
+                        _TableValueCell(text: pendStr, flex: 2),
                       ],
                     ),
                   ),
@@ -15031,11 +17391,15 @@ class _TableHeaderCell extends StatelessWidget {
         alignment: Alignment.centerLeft,
         padding: const EdgeInsets.symmetric(horizontal: 6),
         decoration: BoxDecoration(
-          border: Border(right: BorderSide(color: Colors.grey.shade400)),
+          border: Border(right: BorderSide(color: AppUi.border)),
         ),
         child: Text(
           text,
-          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+          style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: AppUi.text,
+          ),
         ),
       ),
     );
@@ -15057,11 +17421,14 @@ class _TableValueCell extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 6),
         decoration: BoxDecoration(
           border: Border(
-            right: BorderSide(color: Colors.grey.shade300),
-            top: BorderSide(color: Colors.grey.shade200),
+            right: BorderSide(color: AppUi.border),
+            top: BorderSide(color: AppUi.border.withValues(alpha: 0.65)),
           ),
         ),
-        child: Text(text, style: const TextStyle(fontSize: 12)),
+        child: Text(
+          text,
+          style: const TextStyle(fontSize: 12, color: AppUi.text),
+        ),
       ),
     );
   }
@@ -15167,7 +17534,7 @@ class AccountMasterActionPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xFFF1F1F1),
+      color: Theme.of(context).colorScheme.surface,
       padding: const EdgeInsets.fromLTRB(8, 10, 20, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
@@ -15231,6 +17598,7 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
     'hsn': TextEditingController(),
     'ratio': TextEditingController(),
     'reorderQty': TextEditingController(),
+    'expiryDate': TextEditingController(),
     'addVat': TextEditingController(),
     'barcode': TextEditingController(),
   };
@@ -15257,6 +17625,7 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
     'salesGst': FocusNode(),
     'ratio': FocusNode(),
     'reorderQty': FocusNode(),
+    'expiryDate': FocusNode(),
     'expiry': FocusNode(),
     'addVat': FocusNode(),
     'taxOnRate': FocusNode(),
@@ -15360,6 +17729,18 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
       );
       return;
     }
+    if (c('mrp').text.trim().isNotEmpty &&
+        double.tryParse(c('mrp').text.trim()) == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('MRP must be numeric'),
+            duration: Duration(milliseconds: 900),
+          ),
+        );
+      }
+      return;
+    }
 
     final saleRate = _calcSaleRate();
 
@@ -15390,6 +17771,7 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
       'salesGst': _salesGst,
       'ratio': c('ratio').text.trim(),
       'reorderQty': c('reorderQty').text.trim(),
+      'expiryDate': c('expiryDate').text.trim(),
       'expiry': _expiry,
       'addVat': c('addVat').text.trim(),
       'taxOnRate': _taxOnRate,
@@ -15453,6 +17835,7 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
       c('hsn').text = p['hsn'] ?? '';
       c('ratio').text = p['ratio'] ?? '';
       c('reorderQty').text = p['reorderQty'] ?? '';
+      c('expiryDate').text = p['expiryDate'] ?? '';
       c('addVat').text = p['addVat'] ?? '';
       c('barcode').text = p['barcode'] ?? '';
       _discount = p['discount'] ?? 'Yes';
@@ -15468,6 +17851,14 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
 
   Future<void> _editSelected() async {
     if (_selectedIndex == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Select a product to edit'),
+            duration: Duration(milliseconds: 900),
+          ),
+        );
+      }
       return;
     }
     final int? id = productList[_selectedIndex!]['id'] as int?;
@@ -15508,6 +17899,7 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
       'salesGst': _salesGst,
       'ratio': c('ratio').text.trim(),
       'reorderQty': c('reorderQty').text.trim(),
+      'expiryDate': c('expiryDate').text.trim(),
       'expiry': _expiry,
       'addVat': c('addVat').text.trim(),
       'taxOnRate': _taxOnRate,
@@ -15547,6 +17939,14 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
 
   Future<void> _deleteSelected() async {
     if (_selectedIndex == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Select a product to delete'),
+            duration: Duration(milliseconds: 900),
+          ),
+        );
+      }
       return;
     }
     final int? id = productList[_selectedIndex!]['id'] as int?;
@@ -15577,10 +17977,143 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
     _clearForm();
   }
 
+  DateTime? _tryParseYmd(String value) {
+    final v = value.trim();
+    if (v.isEmpty) return null;
+    return DateTime.tryParse(v);
+  }
+
+  List<Map<String, dynamic>> _lowStockProducts() {
+    return productList.where((p) {
+      final stock = double.tryParse((p['stock'] ?? '0').toString()) ?? 0;
+      final min =
+          double.tryParse(
+            (p['reorderQty'] ?? p['minStock'] ?? '0').toString(),
+          ) ??
+          0;
+      return min > 0 && stock <= min;
+    }).toList();
+  }
+
+  List<Map<String, dynamic>> _nearExpiryProducts() {
+    final now = DateTime.now();
+    final threshold = now.add(const Duration(days: 45));
+    return productList.where((p) {
+      final expiry = _tryParseYmd((p['expiryDate'] ?? '').toString());
+      if (expiry == null) return false;
+      return expiry.isAfter(now.subtract(const Duration(days: 1))) &&
+          expiry.isBefore(threshold.add(const Duration(days: 1)));
+    }).toList();
+  }
+
+  List<Map<String, dynamic>> _movingProducts({required bool fast}) {
+    final qtyByProduct = <String, double>{};
+    for (final inv in salesInvoiceRecords) {
+      final items = (inv['items'] as List?) ?? const [];
+      for (final raw in items) {
+        if (raw is! Map) continue;
+        final item = Map<String, dynamic>.from(raw);
+        final name = (item['productName'] ?? '').toString().trim();
+        if (name.isEmpty) continue;
+        final qty =
+            (double.tryParse((item['qty'] ?? '0').toString()) ?? 0) +
+            (double.tryParse((item['free'] ?? '0').toString()) ?? 0);
+        qtyByProduct[name] = (qtyByProduct[name] ?? 0) + qty;
+      }
+    }
+    final entries = qtyByProduct.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final selected = fast
+        ? entries.take(3).toList()
+        : entries.reversed.take(3).toList();
+    return selected
+        .map((e) => <String, dynamic>{'name': e.key, 'qty': e.value})
+        .toList();
+  }
+
+  Widget _buildStockIntelligencePanel() {
+    final low = _lowStockProducts();
+    final nearExpiry = _nearExpiryProducts();
+    final fastMoving = _movingProducts(fast: true);
+    final slowMoving = _movingProducts(fast: false);
+
+    Widget listBlock(
+      String title,
+      List<Map<String, dynamic>> rows,
+      Color color,
+    ) {
+      return Expanded(
+        child: Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFE2E8F0)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: color,
+                ),
+              ),
+              const SizedBox(height: 6),
+              if (rows.isEmpty)
+                const Text(
+                  'No data',
+                  style: TextStyle(fontSize: 11.5, color: Color(0xFF64748B)),
+                )
+              else
+                ...rows
+                    .take(3)
+                    .map(
+                      (row) => Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Text(
+                          '${row['name'] ?? row['product'] ?? '-'} · ${(row['qty'] ?? row['stock'] ?? 0)}',
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Row(
+        children: [
+          listBlock('Low Stock Alerts', low, const Color(0xFFB91C1C)),
+          const SizedBox(width: 8),
+          listBlock('Near Expiry Alerts', nearExpiry, const Color(0xFFC2410C)),
+          const SizedBox(width: 8),
+          listBlock('Fast Moving', fastMoving, const Color(0xFF0F766E)),
+          const SizedBox(width: 8),
+          listBlock('Slow Moving', slowMoving, const Color(0xFF1D4ED8)),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xFFF1F1F1),
+      color: Theme.of(context).colorScheme.surface,
       child: Column(
         children: [
           ProductMasterHeaderBar(onBack: widget.onClose),
@@ -15633,6 +18166,7 @@ class _ProductMasterScreenState extends State<ProductMasterScreen> {
                             selectedIndex: _selectedIndex,
                             onRowTap: _selectProduct,
                           ),
+                          _buildStockIntelligencePanel(),
                         ],
                       ),
                     ),
@@ -15671,7 +18205,7 @@ class ProductMasterHeaderBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
-          colors: [Color(0xFFB0302D), Color(0xFF8B2FA1), Color(0xFF4A4FB5)],
+          colors: [AppUi.primary, AppUi.teal, Color(0xFF0EA5E9)],
           begin: Alignment.centerLeft,
           end: Alignment.centerRight,
         ),
@@ -15945,6 +18479,15 @@ class ProductMasterFormPane extends StatelessWidget {
                     context: context,
                     controller: controllers['reorderQty'],
                     focusNode: focusNodes['reorderQty'],
+                    nextFocusNode: focusNodes['expiryDate'],
+                  ),
+                ),
+                _ProductFormRow(
+                  label: 'Expiry Date',
+                  field: _textInput(
+                    context: context,
+                    controller: controllers['expiryDate'],
+                    focusNode: focusNodes['expiryDate'],
                     nextFocusNode: focusNodes['expiry'],
                   ),
                 ),
@@ -16173,7 +18716,7 @@ class ProductMasterActionPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xFFF1F1F1),
+      color: Theme.of(context).colorScheme.surface,
       padding: const EdgeInsets.fromLTRB(8, 10, 20, 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
@@ -16218,6 +18761,28 @@ class ProductMasterActionPanel extends StatelessWidget {
       ),
     );
   }
+}
+
+Color? _productMasterRowTint(Map<String, dynamic> p) {
+  final stock = double.tryParse((p['stock'] ?? '0').toString()) ?? 0;
+  final reorder =
+      double.tryParse((p['reorderQty'] ?? p['minStock'] ?? '0').toString()) ??
+      0;
+  if (reorder > 0 && stock <= reorder) {
+    return const Color(0xFFFFEBEE);
+  }
+  final expiryRaw = (p['expiryDate'] ?? '').toString().trim();
+  final exp = DateTime.tryParse(expiryRaw);
+  if (exp != null) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final d = DateTime(exp.year, exp.month, exp.day);
+    final days = d.difference(today).inDays;
+    if (days >= 0 && days <= 45) {
+      return const Color(0xFFFFF3E0);
+    }
+  }
+  return null;
 }
 
 class ProductRateTableSection extends StatelessWidget {
@@ -16278,6 +18843,7 @@ class ProductRateTableSection extends StatelessWidget {
                   itemBuilder: (context, index) {
                     final p = productList[index];
                     final isSelected = selectedIndex == index;
+                    final tint = _productMasterRowTint(p);
                     final values = [
                       (p['mrp'] ?? '').toString(),
                       (p['wRate'] ?? '').toString(),
@@ -16300,7 +18866,7 @@ class ProductRateTableSection extends StatelessWidget {
                         height: 26,
                         color: isSelected
                             ? const Color(0xFFDDE8FF)
-                            : Colors.white,
+                            : (tint ?? Colors.white),
                         child: Row(
                           children: values
                               .map((v) => _ProductRateValueCell(text: v))
@@ -16703,7 +19269,7 @@ class DoctorMasterHeaderBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 10),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
-          colors: [Color(0xFFB0302D), Color(0xFF8B2FA1), Color(0xFF4A4FB5)],
+          colors: [AppUi.primary, AppUi.teal, Color(0xFF0EA5E9)],
           begin: Alignment.centerLeft,
           end: Alignment.centerRight,
         ),
@@ -17412,7 +19978,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
     var t = 0.0;
     for (final inv in salesInvoiceRecords) {
       if ((inv['party'] ?? '').toString().trim().toLowerCase() == n) {
-        t += (inv['grandTotal'] as num?)?.toDouble() ??
+        t +=
+            (inv['grandTotal'] as num?)?.toDouble() ??
             double.tryParse('${inv['grandTotal']}') ??
             0;
       }
@@ -17426,7 +19993,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
     var t = 0.0;
     for (final inv in purchaseBillRecords) {
       if ((inv['party'] ?? '').toString().trim().toLowerCase() == n) {
-        t += (inv['grandTotal'] as num?)?.toDouble() ??
+        t +=
+            (inv['grandTotal'] as num?)?.toDouble() ??
             double.tryParse('${inv['grandTotal']}') ??
             0;
       }
@@ -17449,14 +20017,20 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
   }
 
   List<Map<String, dynamic>> _records(String key) {
-    return accountModuleRecords.putIfAbsent(key, () => <Map<String, dynamic>>[]);
+    return accountModuleRecords.putIfAbsent(
+      key,
+      () => <Map<String, dynamic>>[],
+    );
   }
 
   void _showMessage(String message) {
     final messenger = ScaffoldMessenger.maybeOf(context);
     messenger?.hideCurrentSnackBar();
     messenger?.showSnackBar(
-      SnackBar(content: Text(message), duration: const Duration(milliseconds: 900)),
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(milliseconds: 900),
+      ),
     );
   }
 
@@ -17498,7 +20072,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
             onPressed: () => _pickDate(controller),
           ),
           isDense: true,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 11,
+            vertical: 10,
+          ),
           filled: true,
           fillColor: Colors.white,
           border: const OutlineInputBorder(
@@ -17528,7 +20105,11 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 12),
             decoration: BoxDecoration(
               gradient: const LinearGradient(
-                colors: [Color(0xFF4F46E5), Color(0xFF6366F1), Color(0xFF0EA5E9)],
+                colors: [
+                  Color(0xFF4F46E5),
+                  Color(0xFF6366F1),
+                  Color(0xFF0EA5E9),
+                ],
                 begin: Alignment.centerLeft,
                 end: Alignment.centerRight,
               ),
@@ -17555,7 +20136,11 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 16),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 16,
+                    ),
                   ),
               ],
             ),
@@ -17591,12 +20176,18 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
               children: [
                 Text(
                   title,
-                  style: const TextStyle(fontSize: 11.5, color: Color(0xFF475569)),
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    color: Color(0xFF475569),
+                  ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   value,
-                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ],
             ),
@@ -17646,13 +20237,18 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
     };
     setState(() {
       if (_editingReceiptPaymentId != null) {
-        final i = records.indexWhere((x) => x['id'] == _editingReceiptPaymentId);
+        final i = records.indexWhere(
+          (x) => x['id'] == _editingReceiptPaymentId,
+        );
         if (i != -1) records[i] = row;
       } else {
         records.insert(0, row);
       }
       _clearReceiptPaymentForm();
     });
+    if (_moduleType == 'Receipt' || _moduleType == 'Payment') {
+      unawaited(upsertAccountModuleRowToMedPaymentReceipt(row, _moduleType));
+    }
     unawaited(persistAccountModuleSnapshot());
     _showMessage('Saved');
   }
@@ -17685,10 +20281,15 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
       _showMessage('Select a row to delete');
       return;
     }
+    final removed = records[_selectedReceiptPaymentIndex!];
+    final rid = removed['id'] as int?;
     setState(() {
       records.removeAt(_selectedReceiptPaymentIndex!);
       _clearReceiptPaymentForm();
     });
+    if (rid != null && (_moduleType == 'Receipt' || _moduleType == 'Payment')) {
+      unawaited(deleteAccountModuleRowFromMedPaymentReceipt(rid, _moduleType));
+    }
     unawaited(persistAccountModuleSnapshot());
     _showMessage('Deleted');
   }
@@ -17717,7 +20318,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
   }
 
   void _removeJournalLine() {
-    if (_selectedJvLine == null || _selectedJvLine! < 0 || _selectedJvLine! >= _journalLines.length) {
+    if (_selectedJvLine == null ||
+        _selectedJvLine! < 0 ||
+        _selectedJvLine! >= _journalLines.length) {
       _showMessage('Select a line in the grid, then remove');
       return;
     }
@@ -17744,8 +20347,14 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
       _showMessage('Add journal lines first');
       return;
     }
-    final debit = _journalLines.fold<double>(0, (sum, row) => sum + _jvLineDr(row));
-    final credit = _journalLines.fold<double>(0, (sum, row) => sum + _jvLineCr(row));
+    final debit = _journalLines.fold<double>(
+      0,
+      (sum, row) => sum + _jvLineDr(row),
+    );
+    final credit = _journalLines.fold<double>(
+      0,
+      (sum, row) => sum + _jvLineCr(row),
+    );
     if ((debit - credit).abs() > 0.001) {
       _showMessage('Debit and Credit must be equal');
       return;
@@ -17760,7 +20369,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
         'debit': debit,
         'credit': credit,
         'status': 'Success',
-        'lines': _journalLines.map((e) => Map<String, dynamic>.from(e)).toList(),
+        'lines': _journalLines
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList(),
       });
       _journalLines.clear();
       _jvNo.text = _nextNo('Journal Voucher');
@@ -17813,23 +20424,33 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
           Container(
             height: 34,
             padding: const EdgeInsets.symmetric(horizontal: 12),
-            decoration: const BoxDecoration(
-              color: Color(0xFF166534),
-            ),
+            decoration: const BoxDecoration(color: Color(0xFF166534)),
             child: Row(
               children: [
-                const Icon(Icons.call_received, color: Colors.white70, size: 18),
+                const Icon(
+                  Icons.call_received,
+                  color: Colors.white70,
+                  size: 18,
+                ),
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
                     'Receipt (Cash / Bank / UPI)',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                    ),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
                   ),
               ],
             ),
@@ -17854,7 +20475,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                 field: _compactInput(
                                   controller: _voucherNo,
                                   focusNode: _voucherNoFocus,
-                                  onSubmitted: (_) => nextFocus(context, _dateFocus),
+                                  onSubmitted: (_) =>
+                                      nextFocus(context, _dateFocus),
                                 ),
                               ),
                               _CompactFormRow(
@@ -17862,7 +20484,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                 field: _dateInput(
                                   _date,
                                   focusNode: _dateFocus,
-                                  onSubmitted: () => nextFocus(context, _accountFocus),
+                                  onSubmitted: () =>
+                                      nextFocus(context, _accountFocus),
                                 ),
                               ),
                               _CompactFormRow(
@@ -17877,9 +20500,12 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               _CompactFormRow(
                                 label: 'Mode',
                                 field: _compactDropdown(
-                                  value: _paymentMode.text.isEmpty ? 'Cash' : _paymentMode.text,
+                                  value: _paymentMode.text.isEmpty
+                                      ? 'Cash'
+                                      : _paymentMode.text,
                                   values: const ['Cash', 'UPI', 'Bank'],
-                                  onChanged: (v) => setState(() => _paymentMode.text = v),
+                                  onChanged: (v) =>
+                                      setState(() => _paymentMode.text = v),
                                 ),
                               ),
                               _CompactFormRow(
@@ -17896,7 +20522,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                 field: _compactInput(
                                   controller: _reference,
                                   focusNode: _referenceFocus,
-                                  onSubmitted: (_) => nextFocus(context, _remarksFocus),
+                                  onSubmitted: (_) =>
+                                      nextFocus(context, _remarksFocus),
                                 ),
                               ),
                               _CompactFormRow(
@@ -17920,7 +20547,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                             children: [
                               Text(
                                 'Book balance: ${book.toStringAsFixed(2)}',
-                                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 13,
+                                ),
                               ),
                               const SizedBox(height: 6),
                               Text(
@@ -17936,7 +20566,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                   padding: EdgeInsets.only(top: 6),
                                   child: Text(
                                     'Enter party name to compute balance from Account Master opening + posted vouchers.',
-                                    style: TextStyle(fontSize: 11, color: Color(0xFF64748B)),
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: Color(0xFF64748B),
+                                    ),
                                   ),
                                 ),
                             ],
@@ -17951,10 +20584,13 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               onPressed: _saveReceiptPayment,
                               icon: const Icon(Icons.save, size: 16),
                               label: const Text('Save'),
-                              style: FilledButton.styleFrom(backgroundColor: const Color(0xFF166534)),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFF166534),
+                              ),
                             ),
                             OutlinedButton.icon(
-                              onPressed: () => setState(_clearReceiptPaymentForm),
+                              onPressed: () =>
+                                  setState(_clearReceiptPaymentForm),
                               icon: const Icon(Icons.clear, size: 16),
                               label: const Text('Clear'),
                             ),
@@ -17982,7 +20618,14 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                       expandChild: true,
                       contentPadding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
                       child: _SimpleTable(
-                        headers: const ['Voucher', 'Date', 'Party', 'Mode', 'Amount', 'Status'],
+                        headers: const [
+                          'Voucher',
+                          'Date',
+                          'Party',
+                          'Mode',
+                          'Amount',
+                          'Status',
+                        ],
                         selectedIndex: _selectedReceiptPaymentIndex,
                         rows: rows
                             .map(
@@ -17996,7 +20639,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               ],
                             )
                             .toList(),
-                        onRowTap: (index) => setState(() => _selectedReceiptPaymentIndex = index),
+                        onRowTap: (index) => setState(
+                          () => _selectedReceiptPaymentIndex = index,
+                        ),
                       ),
                     ),
                   ),
@@ -18032,13 +20677,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 const Expanded(
                   child: Text(
                     'Payment (outflow)',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                    ),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
                   ),
               ],
             ),
@@ -18059,7 +20712,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                             children: [
                               _CompactFormRow(
                                 label: 'Voucher No',
-                                field: _compactInput(controller: _voucherNo, focusNode: _voucherNoFocus),
+                                field: _compactInput(
+                                  controller: _voucherNo,
+                                  focusNode: _voucherNoFocus,
+                                ),
                               ),
                               _CompactFormRow(
                                 label: 'Date',
@@ -18076,17 +20732,30 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               _CompactFormRow(
                                 label: 'Expense type',
                                 field: _compactDropdown(
-                                  value: _expenseType.text.isEmpty ? 'General' : _expenseType.text,
-                                  values: const ['General', 'Salary', 'Rent', 'Utilities', 'Purchase', 'Other'],
-                                  onChanged: (v) => setState(() => _expenseType.text = v),
+                                  value: _expenseType.text.isEmpty
+                                      ? 'General'
+                                      : _expenseType.text,
+                                  values: const [
+                                    'General',
+                                    'Salary',
+                                    'Rent',
+                                    'Utilities',
+                                    'Purchase',
+                                    'Other',
+                                  ],
+                                  onChanged: (v) =>
+                                      setState(() => _expenseType.text = v),
                                 ),
                               ),
                               _CompactFormRow(
                                 label: 'Mode',
                                 field: _compactDropdown(
-                                  value: _paymentMode.text.isEmpty ? 'Cash' : _paymentMode.text,
+                                  value: _paymentMode.text.isEmpty
+                                      ? 'Cash'
+                                      : _paymentMode.text,
                                   values: const ['Cash', 'UPI', 'Bank'],
-                                  onChanged: (v) => setState(() => _paymentMode.text = v),
+                                  onChanged: (v) =>
+                                      setState(() => _paymentMode.text = v),
                                 ),
                               ),
                               _CompactFormRow(
@@ -18099,12 +20768,19 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               ),
                               _CompactFormRow(
                                 label: 'Reference',
-                                field: _compactInput(controller: _reference, focusNode: _referenceFocus),
+                                field: _compactInput(
+                                  controller: _reference,
+                                  focusNode: _referenceFocus,
+                                ),
                               ),
                               _CompactFormRow(
                                 label: 'Remarks',
                                 topAligned: true,
-                                field: _compactInput(controller: _remarks, focusNode: _remarksFocus, maxLines: 2),
+                                field: _compactInput(
+                                  controller: _remarks,
+                                  focusNode: _remarksFocus,
+                                  maxLines: 2,
+                                ),
                               ),
                             ],
                           ),
@@ -18119,12 +20795,17 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                             children: [
                               Text(
                                 'Total payments (saved): ${rows.fold<double>(0, (s, r) => s + ((r['amount'] as num?)?.toDouble() ?? 0)).toStringAsFixed(2)}',
-                                style: const TextStyle(fontWeight: FontWeight.w600),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                               const SizedBox(height: 10),
                               const Text(
                                 'Payments reduce the party balance in the same ledger used for receipts.',
-                                style: TextStyle(fontSize: 11.5, color: Color(0xFF64748B)),
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  color: Color(0xFF64748B),
+                                ),
                               ),
                             ],
                           ),
@@ -18141,7 +20822,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         onPressed: _saveReceiptPayment,
                         icon: const Icon(Icons.save, size: 16),
                         label: const Text('Save payment'),
-                        style: FilledButton.styleFrom(backgroundColor: const Color(0xFFEA580C)),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFFEA580C),
+                        ),
                       ),
                       const SizedBox(width: 8),
                       OutlinedButton.icon(
@@ -18172,7 +20855,14 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                       expandChild: true,
                       contentPadding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
                       child: _SimpleTable(
-                        headers: const ['Voucher', 'Date', 'Paid to', 'Mode', 'Expense', 'Amount'],
+                        headers: const [
+                          'Voucher',
+                          'Date',
+                          'Paid to',
+                          'Mode',
+                          'Expense',
+                          'Amount',
+                        ],
                         selectedIndex: _selectedReceiptPaymentIndex,
                         rows: rows
                             .map(
@@ -18186,7 +20876,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               ],
                             )
                             .toList(),
-                        onRowTap: (index) => setState(() => _selectedReceiptPaymentIndex = index),
+                        onRowTap: (index) => setState(
+                          () => _selectedReceiptPaymentIndex = index,
+                        ),
                       ),
                     ),
                   ),
@@ -18201,8 +20893,14 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
 
   Widget _journalVoucherScreen() {
     final saved = _records('Journal Voucher');
-    final debit = _journalLines.fold<double>(0, (sum, row) => sum + _jvLineDr(row));
-    final credit = _journalLines.fold<double>(0, (sum, row) => sum + _jvLineCr(row));
+    final debit = _journalLines.fold<double>(
+      0,
+      (sum, row) => sum + _jvLineDr(row),
+    );
+    final credit = _journalLines.fold<double>(
+      0,
+      (sum, row) => sum + _jvLineCr(row),
+    );
     final diff = debit - credit;
     final balanced = diff.abs() < 0.001;
 
@@ -18212,7 +20910,14 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(label, style: const TextStyle(fontSize: 11, color: Color(0xFF64748B), fontWeight: FontWeight.w600)),
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 11,
+                color: Color(0xFF64748B),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
             const SizedBox(height: 2),
             Text(
               value,
@@ -18238,23 +20943,39 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
             decoration: const BoxDecoration(
               color: Color(0xFF27272A),
               boxShadow: [
-                BoxShadow(color: Color(0x33000000), blurRadius: 6, offset: Offset(0, 2)),
+                BoxShadow(
+                  color: Color(0x33000000),
+                  blurRadius: 6,
+                  offset: Offset(0, 2),
+                ),
               ],
             ),
             child: Row(
               children: [
-                const Icon(Icons.account_balance, color: Color(0xFFE4E4E7), size: 22),
+                const Icon(
+                  Icons.account_balance,
+                  color: Color(0xFFE4E4E7),
+                  size: 22,
+                ),
                 const SizedBox(width: 10),
                 const Expanded(
                   child: Text(
                     'Journal voucher',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 15),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                    ),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Color(0xFFA1A1AA), size: 18),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Color(0xFFA1A1AA),
+                      size: 18,
+                    ),
                   ),
               ],
             ),
@@ -18281,7 +21002,11 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               children: [
                                 const Text(
                                   'Voucher header',
-                                  style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: Color(0xFF334155)),
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 13,
+                                    color: Color(0xFF334155),
+                                  ),
                                 ),
                                 const SizedBox(height: 10),
                                 Row(
@@ -18306,7 +21031,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                 _CompactFormRow(
                                   label: 'Narration',
                                   topAligned: true,
-                                  field: _compactInput(controller: _jvNarration, maxLines: 2),
+                                  field: _compactInput(
+                                    controller: _jvNarration,
+                                    maxLines: 2,
+                                  ),
                                 ),
                               ],
                             ),
@@ -18328,7 +21056,11 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                     children: [
                                       const Text(
                                         'Journal lines',
-                                        style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: Color(0xFF334155)),
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w800,
+                                          fontSize: 13,
+                                          color: Color(0xFF334155),
+                                        ),
                                       ),
                                       const Spacer(),
                                       FilledButton.icon(
@@ -18336,14 +21068,19 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                         icon: const Icon(Icons.add, size: 18),
                                         label: const Text('Add line'),
                                         style: FilledButton.styleFrom(
-                                          backgroundColor: const Color(0xFF27272A),
+                                          backgroundColor: const Color(
+                                            0xFF27272A,
+                                          ),
                                           foregroundColor: Colors.white,
                                         ),
                                       ),
                                       const SizedBox(width: 8),
                                       OutlinedButton.icon(
                                         onPressed: _removeJournalLine,
-                                        icon: const Icon(Icons.remove_circle_outline, size: 18),
+                                        icon: const Icon(
+                                          Icons.remove_circle_outline,
+                                          size: 18,
+                                        ),
                                         label: const Text('Remove'),
                                       ),
                                     ],
@@ -18353,7 +21090,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                     children: [
                                       Expanded(
                                         flex: 3,
-                                        child: _compactInput(controller: _jvAccount, hintText: 'Ledger account'),
+                                        child: _compactInput(
+                                          controller: _jvAccount,
+                                          hintText: 'Ledger account',
+                                        ),
                                       ),
                                       const SizedBox(width: 8),
                                       Expanded(
@@ -18378,7 +21118,11 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                   const Divider(height: 1),
                                   Expanded(
                                     child: _SimpleTable(
-                                      headers: const ['Account', 'Debit', 'Credit'],
+                                      headers: const [
+                                        'Account',
+                                        'Debit',
+                                        'Credit',
+                                      ],
                                       selectedIndex: _selectedJvLine,
                                       rows: _journalLines
                                           .map(
@@ -18389,14 +21133,20 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                             ],
                                           )
                                           .toList(),
-                                      onRowTap: (index) => setState(() => _selectedJvLine = index),
+                                      onRowTap: (index) => setState(
+                                        () => _selectedJvLine = index,
+                                      ),
                                     ),
                                   ),
                                   Align(
                                     alignment: Alignment.centerRight,
                                     child: Text(
                                       'Working totals — Debit: ${debit.toStringAsFixed(2)}  Credit: ${credit.toStringAsFixed(2)}',
-                                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF475569)),
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                        color: Color(0xFF475569),
+                                      ),
                                     ),
                                   ),
                                 ],
@@ -18421,18 +21171,33 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                       const Expanded(
                                         child: Text(
                                           'Posted vouchers',
-                                          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: Color(0xFF334155)),
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w800,
+                                            fontSize: 13,
+                                            color: Color(0xFF334155),
+                                          ),
                                         ),
                                       ),
                                       TextButton.icon(
                                         onPressed: () {
-                                          if (_selectedJvIndex == null || _selectedJvIndex! >= saved.length) {
-                                            _showMessage('Select a posted voucher to delete');
+                                          if (_selectedJvIndex == null ||
+                                              _selectedJvIndex! >=
+                                                  saved.length) {
+                                            _showMessage(
+                                              'Select a posted voucher to delete',
+                                            );
                                             return;
                                           }
-                                          setState(() => saved.removeAt(_selectedJvIndex!));
+                                          setState(
+                                            () => saved.removeAt(
+                                              _selectedJvIndex!,
+                                            ),
+                                          );
                                         },
-                                        icon: const Icon(Icons.delete_outline, size: 18),
+                                        icon: const Icon(
+                                          Icons.delete_outline,
+                                          size: 18,
+                                        ),
                                         label: const Text('Delete selected'),
                                       ),
                                     ],
@@ -18440,7 +21205,14 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                   const SizedBox(height: 6),
                                   Expanded(
                                     child: _SimpleTable(
-                                      headers: const ['Voucher', 'Date', 'Narration', 'Debit', 'Credit', 'Status'],
+                                      headers: const [
+                                        'Voucher',
+                                        'Date',
+                                        'Narration',
+                                        'Debit',
+                                        'Credit',
+                                        'Status',
+                                      ],
                                       selectedIndex: _selectedJvIndex,
                                       rows: saved
                                           .map(
@@ -18454,7 +21226,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                             ],
                                           )
                                           .toList(),
-                                      onRowTap: (index) => setState(() => _selectedJvIndex = index),
+                                      onRowTap: (index) => setState(
+                                        () => _selectedJvIndex = index,
+                                      ),
                                     ),
                                   ),
                                 ],
@@ -18482,30 +21256,56 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               children: [
                                 const Text(
                                   'Trial balance',
-                                  style: TextStyle(color: Color(0xFFE4E4E7), fontWeight: FontWeight.w800, fontSize: 13),
+                                  style: TextStyle(
+                                    color: Color(0xFFE4E4E7),
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 13,
+                                  ),
                                 ),
                                 const Divider(color: Color(0xFF3F3F46)),
-                                sideMetric('Total debit', debit.toStringAsFixed(2), valueColor: const Color(0xFFFCA5A5)),
-                                sideMetric('Total credit', credit.toStringAsFixed(2), valueColor: const Color(0xFF93C5FD)),
+                                sideMetric(
+                                  'Total debit',
+                                  debit.toStringAsFixed(2),
+                                  valueColor: const Color(0xFFFCA5A5),
+                                ),
+                                sideMetric(
+                                  'Total credit',
+                                  credit.toStringAsFixed(2),
+                                  valueColor: const Color(0xFF93C5FD),
+                                ),
                                 const Divider(color: Color(0xFF3F3F46)),
                                 sideMetric(
                                   'Difference (Dr − Cr)',
-                                  diff.abs() < 0.001 ? '0.00' : diff.toStringAsFixed(2),
-                                  valueColor: balanced ? const Color(0xFF86EFAC) : const Color(0xFFFCA5A5),
+                                  diff.abs() < 0.001
+                                      ? '0.00'
+                                      : diff.toStringAsFixed(2),
+                                  valueColor: balanced
+                                      ? const Color(0xFF86EFAC)
+                                      : const Color(0xFFFCA5A5),
                                 ),
                                 const SizedBox(height: 8),
                                 Row(
                                   children: [
                                     Icon(
-                                      balanced ? Icons.check_circle : Icons.error_outline,
-                                      color: balanced ? const Color(0xFF86EFAC) : const Color(0xFFFCA5A5),
+                                      balanced
+                                          ? Icons.check_circle
+                                          : Icons.error_outline,
+                                      color: balanced
+                                          ? const Color(0xFF86EFAC)
+                                          : const Color(0xFFFCA5A5),
                                       size: 20,
                                     ),
                                     const SizedBox(width: 8),
                                     Expanded(
                                       child: Text(
-                                        balanced ? 'Balanced — you may post.' : 'Debit must equal credit before post.',
-                                        style: const TextStyle(color: Color(0xFFD4D4D8), fontSize: 11.5, height: 1.25),
+                                        balanced
+                                            ? 'Balanced — you may post.'
+                                            : 'Debit must equal credit before post.',
+                                        style: const TextStyle(
+                                          color: Color(0xFFD4D4D8),
+                                          fontSize: 11.5,
+                                          height: 1.25,
+                                        ),
                                       ),
                                     ),
                                   ],
@@ -18516,11 +21316,17 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         ),
                         const Spacer(),
                         FilledButton.icon(
-                          onPressed: balanced ? _saveJournalVoucher : () => _showMessage('Balance debit and credit first'),
+                          onPressed: balanced
+                              ? _saveJournalVoucher
+                              : () => _showMessage(
+                                  'Balance debit and credit first',
+                                ),
                           icon: const Icon(Icons.save_as, size: 18),
                           label: const Text('Post voucher'),
                           style: FilledButton.styleFrom(
-                            backgroundColor: balanced ? const Color(0xFF15803D) : const Color(0xFF52525B),
+                            backgroundColor: balanced
+                                ? const Color(0xFF15803D)
+                                : const Color(0xFF52525B),
                             foregroundColor: Colors.white,
                             padding: const EdgeInsets.symmetric(vertical: 14),
                           ),
@@ -18574,33 +21380,49 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
         'kind': 'Payment',
       });
     }
-    out.sort((a, b) => (b['date'] ?? '').toString().compareTo((a['date'] ?? '').toString()));
+    out.sort(
+      (a, b) =>
+          (b['date'] ?? '').toString().compareTo((a['date'] ?? '').toString()),
+    );
     return out;
   }
 
   Widget _receiptPaymentRegisterScreen() {
     final partyQ = _filterAccount.text.trim().toLowerCase();
     final filtered = _rpCombinedRows().where((e) {
-      if (!_dateInRange((e['date'] ?? '').toString(), _fromDate.text, _toDate.text)) {
+      if (!_dateInRange(
+        (e['date'] ?? '').toString(),
+        _fromDate.text,
+        _toDate.text,
+      )) {
         return false;
       }
-      if (_rpKindFilter != 'All' && (e['kind'] ?? '').toString() != _rpKindFilter) {
+      if (_rpKindFilter != 'All' &&
+          (e['kind'] ?? '').toString() != _rpKindFilter) {
         return false;
       }
-      if (_rpModeFilter != 'All' && (e['mode'] ?? '').toString() != _rpModeFilter) {
+      if (_rpModeFilter != 'All' &&
+          (e['mode'] ?? '').toString() != _rpModeFilter) {
         return false;
       }
-      if (partyQ.isNotEmpty && !(e['party'] ?? '').toString().toLowerCase().contains(partyQ)) {
+      if (partyQ.isNotEmpty &&
+          !(e['party'] ?? '').toString().toLowerCase().contains(partyQ)) {
         return false;
       }
       return true;
     }).toList();
     final totReceipt = filtered
         .where((e) => e['kind'] == 'Receipt')
-        .fold<double>(0, (s, e) => s + ((e['amount'] as num?)?.toDouble() ?? 0));
+        .fold<double>(
+          0,
+          (s, e) => s + ((e['amount'] as num?)?.toDouble() ?? 0),
+        );
     final totPayment = filtered
         .where((e) => e['kind'] == 'Payment')
-        .fold<double>(0, (s, e) => s + ((e['amount'] as num?)?.toDouble() ?? 0));
+        .fold<double>(
+          0,
+          (s, e) => s + ((e['amount'] as num?)?.toDouble() ?? 0),
+        );
 
     return Container(
       color: const Color(0xFFF1F5F9),
@@ -18620,13 +21442,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     children: [
                       const Text(
                         'Receipt / payment register',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 15),
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                        ),
                       ),
                       const Spacer(),
                       if (widget.onClose != null)
                         IconButton(
                           onPressed: widget.onClose,
-                          icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                          icon: const Icon(
+                            Icons.close,
+                            color: Colors.white70,
+                            size: 18,
+                          ),
                         ),
                     ],
                   ),
@@ -18656,7 +21486,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               children: [
                                 const Text(
                                   'Filters',
-                                  style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF334155)),
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    color: Color(0xFF334155),
+                                  ),
                                 ),
                                 const SizedBox(height: 10),
                                 Row(
@@ -18668,16 +21501,27 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                     Expanded(
                                       child: _compactDropdown(
                                         value: _rpKindFilter,
-                                        values: const ['All', 'Receipt', 'Payment'],
-                                        onChanged: (v) => setState(() => _rpKindFilter = v),
+                                        values: const [
+                                          'All',
+                                          'Receipt',
+                                          'Payment',
+                                        ],
+                                        onChanged: (v) =>
+                                            setState(() => _rpKindFilter = v),
                                       ),
                                     ),
                                     const SizedBox(width: 8),
                                     Expanded(
                                       child: _compactDropdown(
                                         value: _rpModeFilter,
-                                        values: const ['All', 'Cash', 'UPI', 'Bank'],
-                                        onChanged: (v) => setState(() => _rpModeFilter = v),
+                                        values: const [
+                                          'All',
+                                          'Cash',
+                                          'UPI',
+                                          'Bank',
+                                        ],
+                                        onChanged: (v) =>
+                                            setState(() => _rpModeFilter = v),
                                       ),
                                     ),
                                   ],
@@ -18692,7 +21536,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                   alignment: Alignment.centerRight,
                                   child: FilledButton(
                                     onPressed: () => setState(() {}),
-                                    style: FilledButton.styleFrom(backgroundColor: const Color(0xFF0369A1)),
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: const Color(0xFF0369A1),
+                                    ),
                                     child: const Text('Apply filters'),
                                   ),
                                 ),
@@ -18713,25 +21559,35 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                 children: [
                                   const Text(
                                     'Register lines',
-                                    style: TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF334155)),
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      color: Color(0xFF334155),
+                                    ),
                                   ),
                                   const SizedBox(height: 8),
                                   Expanded(
                                     child: _SimpleTable(
-                                      headers: const ['Date', 'Party', 'Mode', 'Amount'],
+                                      headers: const [
+                                        'Date',
+                                        'Party',
+                                        'Mode',
+                                        'Amount',
+                                      ],
                                       selectedIndex: null,
-                                      rows: filtered
-                                          .map((e) {
-                                            final raw = (e['amount'] as num?)?.toDouble() ?? 0;
-                                            final signed = e['kind'] == 'Payment' ? -raw : raw;
-                                            return [
-                                              (e['date'] ?? '').toString(),
-                                              (e['party'] ?? '').toString(),
-                                              (e['mode'] ?? '').toString(),
-                                              signed.toStringAsFixed(2),
-                                            ];
-                                          })
-                                          .toList(),
+                                      rows: filtered.map((e) {
+                                        final raw =
+                                            (e['amount'] as num?)?.toDouble() ??
+                                            0;
+                                        final signed = e['kind'] == 'Payment'
+                                            ? -raw
+                                            : raw;
+                                        return [
+                                          (e['date'] ?? '').toString(),
+                                          (e['party'] ?? '').toString(),
+                                          (e['mode'] ?? '').toString(),
+                                          signed.toStringAsFixed(2),
+                                        ];
+                                      }).toList(),
                                       onRowTap: (_) {},
                                     ),
                                   ),
@@ -18759,34 +21615,58 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               children: [
                                 const Text(
                                   'Summary',
-                                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w800,
+                                  ),
                                 ),
                                 const Divider(color: Color(0xFF334155)),
                                 Text(
                                   'Total receipts',
-                                  style: TextStyle(color: Colors.blueGrey.shade300, fontSize: 11),
+                                  style: TextStyle(
+                                    color: Colors.blueGrey.shade300,
+                                    fontSize: 11,
+                                  ),
                                 ),
                                 Text(
                                   totReceipt.toStringAsFixed(2),
-                                  style: const TextStyle(color: Color(0xFF86EFAC), fontSize: 20, fontWeight: FontWeight.w900),
+                                  style: const TextStyle(
+                                    color: Color(0xFF86EFAC),
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w900,
+                                  ),
                                 ),
                                 const SizedBox(height: 12),
                                 Text(
                                   'Total payments',
-                                  style: TextStyle(color: Colors.blueGrey.shade300, fontSize: 11),
+                                  style: TextStyle(
+                                    color: Colors.blueGrey.shade300,
+                                    fontSize: 11,
+                                  ),
                                 ),
                                 Text(
                                   totPayment.toStringAsFixed(2),
-                                  style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 20, fontWeight: FontWeight.w900),
+                                  style: const TextStyle(
+                                    color: Color(0xFFFCA5A5),
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w900,
+                                  ),
                                 ),
                                 const SizedBox(height: 12),
                                 Text(
                                   'Net (R − P)',
-                                  style: TextStyle(color: Colors.blueGrey.shade300, fontSize: 11),
+                                  style: TextStyle(
+                                    color: Colors.blueGrey.shade300,
+                                    fontSize: 11,
+                                  ),
                                 ),
                                 Text(
                                   (totReceipt - totPayment).toStringAsFixed(2),
-                                  style: const TextStyle(color: Color(0xFFE2E8F0), fontSize: 18, fontWeight: FontWeight.w800),
+                                  style: const TextStyle(
+                                    color: Color(0xFFE2E8F0),
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w800,
+                                  ),
                                 ),
                               ],
                             ),
@@ -18828,7 +21708,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
       _showMessage('Select a row, then edit actual');
       return;
     }
-    final posted = (row['posted'] is num) ? (row['posted'] as num).toDouble() : (double.tryParse('${row['posted']}') ?? 0);
+    final posted = (row['posted'] is num)
+        ? (row['posted'] as num).toDouble()
+        : (double.tryParse('${row['posted']}') ?? 0);
     final ctrl = TextEditingController(text: '${row['actual']}');
     final ok = await showDialog<bool>(
       context: context,
@@ -18837,11 +21719,20 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
         content: TextField(
           controller: ctrl,
           keyboardType: TextInputType.number,
-          decoration: const InputDecoration(labelText: 'Physical / counted actual', border: OutlineInputBorder()),
+          decoration: const InputDecoration(
+            labelText: 'Physical / counted actual',
+            border: OutlineInputBorder(),
+          ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Save'),
+          ),
         ],
       ),
     );
@@ -18858,7 +21749,15 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
 
   Widget _actualVsPostingScreen() {
     final list = _records('Actual v/s Posting');
-    final rows = list.where((e) => _dateInRange((e['date'] ?? '').toString(), _fromDate.text, _toDate.text)).toList();
+    final rows = list
+        .where(
+          (e) => _dateInRange(
+            (e['date'] ?? '').toString(),
+            _fromDate.text,
+            _toDate.text,
+          ),
+        )
+        .toList();
     int? avpSelectedRowIndex;
     if (_selectedAvpRow != null) {
       final ix = rows.indexWhere((e) => identical(e, _selectedAvpRow));
@@ -18889,13 +21788,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 const Expanded(
                   child: Text(
                     'Actual vs posting',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 15),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                    ),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
                   ),
               ],
             ),
@@ -18917,7 +21824,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         children: [
                           const Text(
                             'Compare physical/counted figures with posted vouchers.',
-                            style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF64748B),
+                            ),
                           ),
                           const SizedBox(height: 10),
                           Row(
@@ -18936,7 +21846,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                 onPressed: _editSelectedActualVsPosting,
                                 icon: const Icon(Icons.edit_note, size: 18),
                                 label: const Text('Edit actual'),
-                                style: FilledButton.styleFrom(backgroundColor: const Color(0xFFC2410C)),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFFC2410C),
+                                ),
                               ),
                             ],
                           ),
@@ -18953,22 +21865,32 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(10, 10, 10, 8),
                         child: _SimpleTable(
-                          headers: const ['Date', 'Actual', 'Posted', 'Difference'],
+                          headers: const [
+                            'Date',
+                            'Actual',
+                            'Posted',
+                            'Difference',
+                          ],
                           selectedIndex: avpSelectedRowIndex,
-                          rows: rows
-                              .map((e) {
-                                final a = (e['actual'] is num) ? (e['actual'] as num).toDouble() : (double.tryParse('${e['actual']}') ?? 0);
-                                final p = (e['posted'] is num) ? (e['posted'] as num).toDouble() : (double.tryParse('${e['posted']}') ?? 0);
-                                final d = (e['difference'] is num) ? (e['difference'] as num).toDouble() : (a - p);
-                                return [
-                                  (e['date'] ?? '').toString(),
-                                  a.toStringAsFixed(2),
-                                  p.toStringAsFixed(2),
-                                  d.toStringAsFixed(2),
-                                ];
-                              })
-                              .toList(),
-                          onRowTap: (i) => setState(() => _selectedAvpRow = rows[i]),
+                          rows: rows.map((e) {
+                            final a = (e['actual'] is num)
+                                ? (e['actual'] as num).toDouble()
+                                : (double.tryParse('${e['actual']}') ?? 0);
+                            final p = (e['posted'] is num)
+                                ? (e['posted'] as num).toDouble()
+                                : (double.tryParse('${e['posted']}') ?? 0);
+                            final d = (e['difference'] is num)
+                                ? (e['difference'] as num).toDouble()
+                                : (a - p);
+                            return [
+                              (e['date'] ?? '').toString(),
+                              a.toStringAsFixed(2),
+                              p.toStringAsFixed(2),
+                              d.toStringAsFixed(2),
+                            ];
+                          }).toList(),
+                          onRowTap: (i) =>
+                              setState(() => _selectedAvpRow = rows[i]),
                         ),
                       ),
                     ),
@@ -18991,7 +21913,13 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
           ((e['cgst'] as num?)?.toDouble() ?? 0) +
           ((e['sgst'] as num?)?.toDouble() ?? 0) +
           ((e['igst'] as num?)?.toDouble() ?? 0);
-      rows.add({'date': d, 'doc': e['billNo'] ?? '', 'party': e['party'] ?? '', 'vat': vat, 'kind': 'Sales'});
+      rows.add({
+        'date': d,
+        'doc': e['billNo'] ?? '',
+        'party': e['party'] ?? '',
+        'vat': vat,
+        'kind': 'Sales',
+      });
     }
     for (final e in purchaseBillRecords) {
       final d = (e['date'] ?? '').toString();
@@ -19000,15 +21928,27 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
           ((e['cgst'] as num?)?.toDouble() ?? 0) +
           ((e['sgst'] as num?)?.toDouble() ?? 0) +
           ((e['igst'] as num?)?.toDouble() ?? 0);
-      rows.add({'date': d, 'doc': e['billNo'] ?? '', 'party': e['party'] ?? '', 'vat': vat, 'kind': 'Purchase'});
+      rows.add({
+        'date': d,
+        'doc': e['billNo'] ?? '',
+        'party': e['party'] ?? '',
+        'vat': vat,
+        'kind': 'Purchase',
+      });
     }
-    rows.sort((a, b) => (b['date'] ?? '').toString().compareTo((a['date'] ?? '').toString()));
+    rows.sort(
+      (a, b) =>
+          (b['date'] ?? '').toString().compareTo((a['date'] ?? '').toString()),
+    );
     return rows;
   }
 
   Widget _vatReportsScreen() {
     final lines = _vatReportLines();
-    final totalVat = lines.fold<double>(0, (s, e) => s + ((e['vat'] as num?)?.toDouble() ?? 0));
+    final totalVat = lines.fold<double>(
+      0,
+      (s, e) => s + ((e['vat'] as num?)?.toDouble() ?? 0),
+    );
 
     return Container(
       color: const Color(0xFFFEF3C7),
@@ -19023,13 +21963,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
               children: [
                 const Text(
                   'VAT reports',
-                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 15),
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15,
+                  ),
                 ),
                 const Spacer(),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
                   ),
               ],
             ),
@@ -19055,16 +22003,28 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                           Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              const Text('VAT in period (CGST+SGST+IGST)', style: TextStyle(fontSize: 11, color: Color(0xFF64748B))),
+                              const Text(
+                                'VAT in period (CGST+SGST+IGST)',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Color(0xFF64748B),
+                                ),
+                              ),
                               Text(
                                 totalVat.toStringAsFixed(2),
-                                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Color(0xFFB45309)),
+                                style: const TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w900,
+                                  color: Color(0xFFB45309),
+                                ),
                               ),
                             ],
                           ),
                           FilledButton(
                             onPressed: () => setState(() {}),
-                            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFB45309)),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFFB45309),
+                            ),
                             child: const Text('Refresh'),
                           ),
                         ],
@@ -19080,7 +22040,13 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                       child: Padding(
                         padding: const EdgeInsets.fromLTRB(10, 10, 10, 8),
                         child: _SimpleTable(
-                          headers: const ['Date', 'Document', 'Party', 'Kind', 'VAT amount'],
+                          headers: const [
+                            'Date',
+                            'Document',
+                            'Party',
+                            'Kind',
+                            'VAT amount',
+                          ],
                           selectedIndex: null,
                           rows: lines
                               .map(
@@ -19089,7 +22055,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                   (e['doc'] ?? '').toString(),
                                   (e['party'] ?? '').toString(),
                                   (e['kind'] ?? '').toString(),
-                                  ((e['vat'] as num?)?.toDouble() ?? 0).toStringAsFixed(2),
+                                  ((e['vat'] as num?)?.toDouble() ?? 0)
+                                      .toStringAsFixed(2),
                                 ],
                               )
                               .toList(),
@@ -19126,9 +22093,7 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
           Container(
             height: 40,
             padding: const EdgeInsets.symmetric(horizontal: 12),
-            decoration: const BoxDecoration(
-              color: Color(0xFF4338CA),
-            ),
+            decoration: const BoxDecoration(color: Color(0xFF4338CA)),
             child: Row(
               children: [
                 const Icon(Icons.cloud_upload_outlined, color: Colors.white70),
@@ -19136,7 +22101,11 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 const Expanded(
                   child: Text(
                     'e-Invoicing',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 15),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                    ),
                   ),
                 ),
                 FilledButton.tonal(
@@ -19145,20 +22114,27 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                       for (final e in salesInvoiceRecords) {
                         final no = (e['billNo'] ?? '').toString();
                         if (no.isEmpty) continue;
-                        if ((einvoiceStatusByBillNo[no] ?? 'Pending') == 'Pending') {
+                        if ((einvoiceStatusByBillNo[no] ?? 'Pending') ==
+                            'Pending') {
                           einvoiceStatusByBillNo[no] = 'Generated';
                         }
                       }
                     });
                     _showMessage('Generated for all pending invoices');
                   },
-                  style: FilledButton.styleFrom(foregroundColor: const Color(0xFF312E81)),
+                  style: FilledButton.styleFrom(
+                    foregroundColor: const Color(0xFF312E81),
+                  ),
                   child: const Text('Generate all pending'),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
                   ),
               ],
             ),
@@ -19185,28 +22161,54 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         children: [
                           SizedBox(
                             width: 100,
-                            child: Text(no, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12.5)),
+                            child: Text(
+                              no,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12.5,
+                              ),
+                            ),
                           ),
                           SizedBox(
                             width: 100,
-                            child: Text((r['date'] ?? '').toString(), style: const TextStyle(fontSize: 12.5)),
+                            child: Text(
+                              (r['date'] ?? '').toString(),
+                              style: const TextStyle(fontSize: 12.5),
+                            ),
                           ),
                           Expanded(
-                            child: Text((r['party'] ?? '').toString(), style: const TextStyle(fontSize: 12.5, color: Color(0xFF475569))),
+                            child: Text(
+                              (r['party'] ?? '').toString(),
+                              style: const TextStyle(
+                                fontSize: 12.5,
+                                color: Color(0xFF475569),
+                              ),
+                            ),
                           ),
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
                             decoration: BoxDecoration(
-                              color: pending ? const Color(0xFFFEF3C7) : const Color(0xFFD1FAE5),
+                              color: pending
+                                  ? const Color(0xFFFEF3C7)
+                                  : const Color(0xFFD1FAE5),
                               borderRadius: BorderRadius.circular(999),
-                              border: Border.all(color: pending ? const Color(0xFFF59E0B) : const Color(0xFF10B981)),
+                              border: Border.all(
+                                color: pending
+                                    ? const Color(0xFFF59E0B)
+                                    : const Color(0xFF10B981),
+                              ),
                             ),
                             child: Text(
                               st,
                               style: TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w700,
-                                color: pending ? const Color(0xFFB45309) : const Color(0xFF047857),
+                                color: pending
+                                    ? const Color(0xFFB45309)
+                                    : const Color(0xFF047857),
                               ),
                             ),
                           ),
@@ -19217,18 +22219,27 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                 setState(() {
                                   einvoiceStatusByBillNo[no] = 'Generated';
                                 });
-                                _showMessage('e-Invoice marked generated for $no');
+                                _showMessage(
+                                  'e-Invoice marked generated for $no',
+                                );
                               },
                               style: FilledButton.styleFrom(
                                 backgroundColor: const Color(0xFF4F46E5),
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 8,
+                                ),
                               ),
                               child: const Text('Generate'),
                             )
                           else
                             const Padding(
                               padding: EdgeInsets.symmetric(horizontal: 8),
-                              child: Icon(Icons.check_circle, color: Color(0xFF059669), size: 22),
+                              child: Icon(
+                                Icons.check_circle,
+                                color: Color(0xFF059669),
+                                size: 22,
+                              ),
                             ),
                         ],
                       ),
@@ -19259,13 +22270,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 const Expanded(
                   child: Text(
                     'Account module routing',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 15),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                    ),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
                   ),
               ],
             ),
@@ -19276,7 +22295,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 constraints: const BoxConstraints(maxWidth: 440),
                 child: Card(
                   elevation: 3,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
                   child: Padding(
                     padding: const EdgeInsets.all(22),
                     child: Column(
@@ -19285,14 +22306,20 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         Text(
                           'The screen "${widget.title}" is not mapped in AccountModuleScreen.',
                           textAlign: TextAlign.center,
-                          style: const TextStyle(fontSize: 14, height: 1.35, color: Color(0xFF334155)),
+                          style: const TextStyle(
+                            fontSize: 14,
+                            height: 1.35,
+                            color: Color(0xFF334155),
+                          ),
                         ),
                         const SizedBox(height: 18),
                         FilledButton.icon(
                           onPressed: widget.onClose,
                           icon: const Icon(Icons.close),
                           label: const Text('Close'),
-                          style: FilledButton.styleFrom(backgroundColor: const Color(0xFFB45309)),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFB45309),
+                          ),
                         ),
                       ],
                     ),
@@ -19327,13 +22354,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 const Expanded(
                   child: Text(
                     'Journal register',
-                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF0F172A)),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 15,
+                      color: Color(0xFF0F172A),
+                    ),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.black45, size: 18),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.black45,
+                      size: 18,
+                    ),
                   ),
               ],
             ),
@@ -19352,14 +22387,24 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     side: const BorderSide(color: Color(0xFFE2E8F0)),
                   ),
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         CircleAvatar(
                           radius: 18,
                           backgroundColor: const Color(0xFFE0E7FF),
-                          child: Text('${i + 1}', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: Color(0xFF4338CA))),
+                          child: Text(
+                            '${i + 1}',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF4338CA),
+                            ),
+                          ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
@@ -19368,12 +22413,18 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                             children: [
                               Text(
                                 (r['voucherNo'] ?? '').toString(),
-                                style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 14,
+                                ),
                               ),
                               const SizedBox(height: 4),
                               Text(
                                 '${r['date'] ?? ''}  ·  ${r['narration'] ?? ''}',
-                                style: const TextStyle(fontSize: 12.5, color: Color(0xFF64748B)),
+                                style: const TextStyle(
+                                  fontSize: 12.5,
+                                  color: Color(0xFF64748B),
+                                ),
                               ),
                             ],
                           ),
@@ -19381,10 +22432,28 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            Text('Dr ${r['debit'] ?? ''}', style: const TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF991B1B))),
-                            Text('Cr ${r['credit'] ?? ''}', style: const TextStyle(fontWeight: FontWeight.w700, color: Color(0xFF1D4ED8))),
+                            Text(
+                              'Dr ${r['debit'] ?? ''}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF991B1B),
+                              ),
+                            ),
+                            Text(
+                              'Cr ${r['credit'] ?? ''}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF1D4ED8),
+                              ),
+                            ),
                             const SizedBox(height: 4),
-                            Text((r['status'] ?? '').toString(), style: const TextStyle(fontSize: 11, color: Color(0xFF64748B))),
+                            Text(
+                              (r['status'] ?? '').toString(),
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF64748B),
+                              ),
+                            ),
                           ],
                         ),
                       ],
@@ -19403,7 +22472,11 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
     final all = _salesRegisterRows();
     final q = _filterAccount.text.trim().toLowerCase();
     final rows = all.where((r) {
-      if (!_dateInRange((r['date'] ?? '').toString(), _fromDate.text, _toDate.text)) {
+      if (!_dateInRange(
+        (r['date'] ?? '').toString(),
+        _fromDate.text,
+        _toDate.text,
+      )) {
         return false;
       }
       if (q.isEmpty) return true;
@@ -19413,28 +22486,75 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
       0,
       (s, r) => s + (double.tryParse((r['amount'] ?? '0').toString()) ?? 0),
     );
+    final avg = rows.isEmpty ? 0.0 : total / rows.length;
+    final pendingCount = rows.where((r) {
+      final st = (r['status'] ?? '').toString().toLowerCase();
+      return st == 'pending' || st == 'partial';
+    }).length;
     return Container(
       color: const Color(0xFFF8FAFC),
       child: Column(
         children: [
           Container(
-            height: 34,
+            height: 50,
             padding: const EdgeInsets.symmetric(horizontal: 12),
-            decoration: const BoxDecoration(
-              color: Color(0xFF0F766E),
-            ),
+            decoration: const BoxDecoration(color: Color(0xFF0F766E)),
             child: Row(
               children: [
                 const Expanded(
-                  child: Text(
-                    'Sales Register',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Sales Register',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
+                      ),
+                      SizedBox(height: 2),
+                      Text(
+                        'Invoice-wise sales tracking with period filters',
+                        style: TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () => _showMessage('Print requested'),
+                  icon: const Icon(
+                    Icons.print_outlined,
+                    size: 15,
+                    color: Colors.white,
+                  ),
+                  label: const Text(
+                    'Print',
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                TextButton.icon(
+                  onPressed: () => setState(() {}),
+                  icon: const Icon(
+                    Icons.refresh_rounded,
+                    size: 15,
+                    color: Colors.white,
+                  ),
+                  label: const Text(
+                    'Refresh',
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 16),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 16,
+                    ),
                   ),
               ],
             ),
@@ -19450,7 +22570,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     child: Column(
                       children: [
                         _SectionCard(
-                          title: 'Filters',
+                          title: 'Filters / Input',
+                          subtitle:
+                              'From date, to date, customer and status refine',
                           child: Row(
                             children: [
                               Expanded(child: _dateInput(_fromDate)),
@@ -19467,20 +22589,82 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                               ),
                               FilledButton(
                                 onPressed: () => setState(() {}),
-                                style: FilledButton.styleFrom(backgroundColor: const Color(0xFF0F766E)),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFF0F766E),
+                                ),
                                 child: const Text('Apply'),
+                              ),
+                              const SizedBox(width: 8),
+                              OutlinedButton(
+                                onPressed: () {
+                                  setState(() {
+                                    _fromDate.text = _today();
+                                    _toDate.text = _today();
+                                    _filterAccount.clear();
+                                  });
+                                },
+                                child: const Text('Reset'),
                               ),
                             ],
                           ),
                         ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _statCard(
+                                'Total sales',
+                                total.toStringAsFixed(2),
+                                Icons.payments_rounded,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _statCard(
+                                'Invoices',
+                                '${rows.length}',
+                                Icons.receipt_long_rounded,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _statCard(
+                                'Avg value',
+                                avg.toStringAsFixed(2),
+                                Icons.stacked_line_chart_rounded,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: _statCard(
+                                'Pending',
+                                '$pendingCount',
+                                Icons.warning_amber_rounded,
+                              ),
+                            ),
+                          ],
+                        ),
                         const SizedBox(height: 10),
                         Expanded(
                           child: _SectionCard(
-                            title: 'Invoices',
+                            title: 'Main Content',
+                            subtitle: 'Sales invoices in selected range',
                             expandChild: true,
-                            contentPadding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                            contentPadding: const EdgeInsets.fromLTRB(
+                              10,
+                              8,
+                              10,
+                              10,
+                            ),
                             child: _SimpleTable(
-                              headers: const ['Invoice', 'Date', 'Customer', 'Amount', 'Status'],
+                              headers: const [
+                                'Invoice',
+                                'Date',
+                                'Customer',
+                                'Amount',
+                                'Status',
+                                'Actions',
+                              ],
                               selectedIndex: null,
                               rows: rows
                                   .map(
@@ -19490,10 +22674,17 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                       (r['customer'] ?? '').toString(),
                                       (r['amount'] ?? '').toString(),
                                       (r['status'] ?? '').toString(),
+                                      'View',
                                     ],
                                   )
                                   .toList(),
-                              onRowTap: (_) {},
+                              onRowTap: (index) {
+                                if (index >= 0 && index < rows.length) {
+                                  _showMessage(
+                                    'Invoice ${rows[index]['invoiceNo'] ?? ''} selected',
+                                  );
+                                }
+                              },
                             ),
                           ),
                         ),
@@ -19506,18 +22697,35 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     child: Column(
                       children: [
                         _SectionCard(
-                          title: 'Total sales',
+                          title: 'Summary / Stats',
+                          subtitle: 'Quick figures for current filter',
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
                                 total.toStringAsFixed(2),
-                                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Color(0xFF0F766E)),
+                                style: const TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF0F766E),
+                                ),
                               ),
                               const SizedBox(height: 6),
                               Text(
                                 '${rows.length} invoice(s) in range',
-                                style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF64748B),
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Pending: $pendingCount',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFFB45309),
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ],
                           ),
@@ -19538,7 +22746,11 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
     final all = _purchaseRegisterRows();
     final q = _filterAccount.text.trim().toLowerCase();
     final rows = all.where((r) {
-      if (!_dateInRange((r['date'] ?? '').toString(), _fromDate.text, _toDate.text)) {
+      if (!_dateInRange(
+        (r['date'] ?? '').toString(),
+        _fromDate.text,
+        _toDate.text,
+      )) {
         return false;
       }
       if (q.isEmpty) return true;
@@ -19548,28 +22760,71 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
       0,
       (s, r) => s + (double.tryParse((r['amount'] ?? '0').toString()) ?? 0),
     );
+    final avg = rows.isEmpty ? 0.0 : total / rows.length;
     return Container(
       color: const Color(0xFFFFFBEB),
       child: Column(
         children: [
           Container(
-            height: 34,
+            height: 50,
             padding: const EdgeInsets.symmetric(horizontal: 12),
-            decoration: const BoxDecoration(
-              color: Color(0xFFB45309),
-            ),
+            decoration: const BoxDecoration(color: Color(0xFFB45309)),
             child: Row(
               children: [
                 const Expanded(
-                  child: Text(
-                    'Purchase Register',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Purchase Register',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
+                      ),
+                      SizedBox(height: 2),
+                      Text(
+                        'Supplier bills with date-wise analysis',
+                        style: TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () => _showMessage('Export requested'),
+                  icon: const Icon(
+                    Icons.file_download_outlined,
+                    size: 15,
+                    color: Colors.white,
+                  ),
+                  label: const Text(
+                    'Export',
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                TextButton.icon(
+                  onPressed: () => setState(() {}),
+                  icon: const Icon(
+                    Icons.refresh_rounded,
+                    size: 15,
+                    color: Colors.white,
+                  ),
+                  label: const Text(
+                    'Refresh',
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 16),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 16,
+                    ),
                   ),
               ],
             ),
@@ -19580,7 +22835,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
               child: Column(
                 children: [
                   _SectionCard(
-                    title: 'Filters',
+                    title: 'Filters / Input',
+                    subtitle: 'Choose period and supplier keyword',
                     child: Row(
                       children: [
                         Expanded(child: _dateInput(_fromDate)),
@@ -19597,17 +22853,61 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         ),
                         FilledButton(
                           onPressed: () => setState(() {}),
-                          style: FilledButton.styleFrom(backgroundColor: const Color(0xFFB45309)),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFB45309),
+                          ),
                           child: const Text('Apply'),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: () {
+                            setState(() {
+                              _fromDate.text = _today();
+                              _toDate.text = _today();
+                              _filterAccount.clear();
+                            });
+                          },
+                          child: const Text('Reset'),
                         ),
                       ],
                     ),
                   ),
                   const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _statCard(
+                          'Total purchase',
+                          total.toStringAsFixed(2),
+                          Icons.shopping_basket_rounded,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _statCard(
+                          'Bills',
+                          '${rows.length}',
+                          Icons.receipt_rounded,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _statCard(
+                          'Avg bill',
+                          avg.toStringAsFixed(2),
+                          Icons.analytics_rounded,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
                   Align(
                     alignment: Alignment.centerRight,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(10),
@@ -19616,10 +22916,17 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Text('Total purchase ', style: TextStyle(color: Color(0xFF64748B))),
+                          const Text(
+                            'Total purchase ',
+                            style: TextStyle(color: Color(0xFF64748B)),
+                          ),
                           Text(
                             total.toStringAsFixed(2),
-                            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Color(0xFFB45309)),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 18,
+                              color: Color(0xFFB45309),
+                            ),
                           ),
                         ],
                       ),
@@ -19628,11 +22935,18 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                   const SizedBox(height: 8),
                   Expanded(
                     child: _SectionCard(
-                      title: 'Bills',
+                      title: 'Main Content',
+                      subtitle: 'Purchase bills for selected period',
                       expandChild: true,
                       contentPadding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
                       child: _SimpleTable(
-                        headers: const ['Bill', 'Date', 'Supplier', 'Amount'],
+                        headers: const [
+                          'Bill',
+                          'Date',
+                          'Supplier',
+                          'Amount',
+                          'Actions',
+                        ],
                         selectedIndex: null,
                         rows: rows
                             .map(
@@ -19641,10 +22955,17 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                 (r['date'] ?? '').toString(),
                                 (r['supplier'] ?? '').toString(),
                                 (r['amount'] ?? '').toString(),
+                                'View',
                               ],
                             )
                             .toList(),
-                        onRowTap: (_) {},
+                        onRowTap: (index) {
+                          if (index >= 0 && index < rows.length) {
+                            _showMessage(
+                              'Bill ${rows[index]['billNo'] ?? ''} selected',
+                            );
+                          }
+                        },
                       ),
                     ),
                   ),
@@ -19666,7 +22987,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
       final gstOk =
           _gstOutputFilter == 'All' ||
           t == _gstOutputFilter ||
-          (_gstOutputFilter == 'GST Exempt' && (t == 'GST Exempt' || t == 'Exempt'));
+          (_gstOutputFilter == 'GST Exempt' &&
+              (t == 'GST Exempt' || t == 'Exempt'));
       if (!gstOk) continue;
       rows.add({
         'kind': 'Sales',
@@ -19686,7 +23008,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
       final gstOk =
           _gstOutputFilter == 'All' ||
           t == _gstOutputFilter ||
-          (_gstOutputFilter == 'GST Exempt' && (t == 'GST Exempt' || t == 'Exempt'));
+          (_gstOutputFilter == 'GST Exempt' &&
+              (t == 'GST Exempt' || t == 'Exempt'));
       if (!gstOk) continue;
       rows.add({
         'kind': 'Purchase',
@@ -19699,7 +23022,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
         'igst': (e['igst'] as num?)?.toDouble() ?? 0,
       });
     }
-    rows.sort((a, b) => (b['date'] ?? '').toString().compareTo((a['date'] ?? '').toString()));
+    rows.sort(
+      (a, b) =>
+          (b['date'] ?? '').toString().compareTo((a['date'] ?? '').toString()),
+    );
     return rows;
   }
 
@@ -19714,7 +23040,7 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
       child: Column(
         children: [
           Container(
-            height: 34,
+            height: 50,
             padding: const EdgeInsets.symmetric(horizontal: 12),
             decoration: const BoxDecoration(
               gradient: LinearGradient(
@@ -19726,15 +23052,59 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
             child: Row(
               children: [
                 const Expanded(
-                  child: Text(
-                    'GST Reports',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'GST Reports',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
+                      ),
+                      SizedBox(height: 2),
+                      Text(
+                        'CGST / SGST / IGST reconciliation view',
+                        style: TextStyle(color: Colors.white70, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () => _showMessage('Export requested'),
+                  icon: const Icon(
+                    Icons.file_download_outlined,
+                    size: 15,
+                    color: Colors.white,
+                  ),
+                  label: const Text(
+                    'Export',
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                TextButton.icon(
+                  onPressed: () => _showMessage('Print requested'),
+                  icon: const Icon(
+                    Icons.print_outlined,
+                    size: 15,
+                    color: Colors.white,
+                  ),
+                  label: const Text(
+                    'Print',
+                    style: TextStyle(color: Colors.white, fontSize: 11.5),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 16),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 16,
+                    ),
                   ),
               ],
             ),
@@ -19746,7 +23116,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   _SectionCard(
-                    title: 'Period & GST type',
+                    title: 'Filters / Input',
+                    subtitle: 'Choose period and GST output type',
                     child: Row(
                       children: [
                         Expanded(child: _dateInput(_fromDate)),
@@ -19756,14 +23127,33 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         Expanded(
                           child: _compactDropdown(
                             value: _gstOutputFilter,
-                            values: const ['All', 'GST Local', 'IGST', 'GST Exempt'],
-                            onChanged: (v) => setState(() => _gstOutputFilter = v),
+                            values: const [
+                              'All',
+                              'GST Local',
+                              'IGST',
+                              'GST Exempt',
+                            ],
+                            onChanged: (v) =>
+                                setState(() => _gstOutputFilter = v),
                           ),
                         ),
                         FilledButton(
                           onPressed: () => setState(() {}),
-                          style: FilledButton.styleFrom(backgroundColor: const Color(0xFF7C3AED)),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF7C3AED),
+                          ),
                           child: const Text('Refresh'),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: () {
+                            setState(() {
+                              _fromDate.text = _today();
+                              _toDate.text = _today();
+                              _gstOutputFilter = 'All';
+                            });
+                          },
+                          child: const Text('Reset'),
                         ),
                       ],
                     ),
@@ -19771,23 +23161,58 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                   const SizedBox(height: 10),
                   Row(
                     children: [
-                      Expanded(child: _statCard('CGST', cgst.toStringAsFixed(2), Icons.looks_one)),
+                      Expanded(
+                        child: _statCard(
+                          'CGST',
+                          cgst.toStringAsFixed(2),
+                          Icons.looks_one,
+                        ),
+                      ),
                       const SizedBox(width: 8),
-                      Expanded(child: _statCard('SGST', sgst.toStringAsFixed(2), Icons.looks_two)),
+                      Expanded(
+                        child: _statCard(
+                          'SGST',
+                          sgst.toStringAsFixed(2),
+                          Icons.looks_two,
+                        ),
+                      ),
                       const SizedBox(width: 8),
-                      Expanded(child: _statCard('IGST', igst.toStringAsFixed(2), Icons.looks_3)),
+                      Expanded(
+                        child: _statCard(
+                          'IGST',
+                          igst.toStringAsFixed(2),
+                          Icons.looks_3,
+                        ),
+                      ),
                       const SizedBox(width: 8),
-                      Expanded(child: _statCard('Total GST', totalGst.toStringAsFixed(2), Icons.receipt_long)),
+                      Expanded(
+                        child: _statCard(
+                          'Total GST',
+                          totalGst.toStringAsFixed(2),
+                          Icons.receipt_long,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 10),
                   Expanded(
                     child: _SectionCard(
-                      title: 'Invoice-wise tax',
+                      title: 'Main Content',
+                      subtitle: 'Invoice-wise GST breakup',
                       expandChild: true,
                       contentPadding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
                       child: _SimpleTable(
-                        headers: const ['Type', 'No', 'Date', 'Party', 'Taxable', 'CGST', 'SGST', 'IGST'],
+                        headers: const [
+                          'Type',
+                          'No',
+                          'Date',
+                          'Party',
+                          'Taxable',
+                          'CGST',
+                          'SGST',
+                          'IGST',
+                          'Actions',
+                        ],
                         selectedIndex: null,
                         rows: inv
                             .map(
@@ -19800,10 +23225,17 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                 (r['cgst'] as double).toStringAsFixed(2),
                                 (r['sgst'] as double).toStringAsFixed(2),
                                 (r['igst'] as double).toStringAsFixed(2),
+                                'View',
                               ],
                             )
                             .toList(),
-                        onRowTap: (_) {},
+                        onRowTap: (index) {
+                          if (index >= 0 && index < inv.length) {
+                            _showMessage(
+                              '${inv[index]['kind']} ${inv[index]['no']} selected',
+                            );
+                          }
+                        },
                       ),
                     ),
                   ),
@@ -19830,20 +23262,51 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
     final receiptRows = _records('Receipt');
     final paymentRows = _records('Payment');
     final selectedAccount = _filterAccount.text.trim();
-    final ledgerEntries = <Map<String, dynamic>>[
-      ...receiptRows.map((e) => {'date': e['date'], 'voucher': e['voucherNo'], 'account': e['account'], 'debit': e['amount'], 'credit': 0, 'type': 'Receipt'}),
-      ...paymentRows.map((e) => {'date': e['date'], 'voucher': e['voucherNo'], 'account': e['account'], 'debit': 0, 'credit': e['amount'], 'type': 'Payment'}),
-    ].where((e) {
-      if (!_dateInRange((e['date'] ?? '').toString(), _fromDate.text, _toDate.text)) {
-        return false;
-      }
-      if (selectedAccount.isEmpty) return true;
-      return (e['account'] ?? '').toString().toLowerCase().contains(selectedAccount.toLowerCase());
-    }).toList()
-      ..sort((a, b) => (a['date'] ?? '').toString().compareTo((b['date'] ?? '').toString()));
+    final ledgerEntries =
+        <Map<String, dynamic>>[
+            ...receiptRows.map(
+              (e) => {
+                'date': e['date'],
+                'voucher': e['voucherNo'],
+                'account': e['account'],
+                'debit': e['amount'],
+                'credit': 0,
+                'type': 'Receipt',
+              },
+            ),
+            ...paymentRows.map(
+              (e) => {
+                'date': e['date'],
+                'voucher': e['voucherNo'],
+                'account': e['account'],
+                'debit': 0,
+                'credit': e['amount'],
+                'type': 'Payment',
+              },
+            ),
+          ].where((e) {
+            if (!_dateInRange(
+              (e['date'] ?? '').toString(),
+              _fromDate.text,
+              _toDate.text,
+            )) {
+              return false;
+            }
+            if (selectedAccount.isEmpty) return true;
+            return (e['account'] ?? '').toString().toLowerCase().contains(
+              selectedAccount.toLowerCase(),
+            );
+          }).toList()
+          ..sort(
+            (a, b) => (a['date'] ?? '').toString().compareTo(
+              (b['date'] ?? '').toString(),
+            ),
+          );
 
     final matchedName = _firstAccountNameContaining(selectedAccount);
-    final opening = matchedName == null ? 0.0 : _openingBalanceForAccountName(matchedName);
+    final opening = matchedName == null
+        ? 0.0
+        : _openingBalanceForAccountName(matchedName);
     double running = opening;
     final tableRows = <List<String>>[];
     for (final e in ledgerEntries) {
@@ -19873,13 +23336,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 const Expanded(
                   child: Text(
                     'General Ledger',
-                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                    ),
                   ),
                 ),
                 if (widget.onClose != null)
                   IconButton(
                     onPressed: widget.onClose,
-                    icon: const Icon(Icons.close, color: Colors.white70, size: 16),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white70,
+                      size: 16,
+                    ),
                   ),
               ],
             ),
@@ -19898,20 +23369,34 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         children: [
                           Text(
                             'Opening (from master): ${opening.toStringAsFixed(2)}',
-                            style: const TextStyle(fontSize: 12, color: Color(0xFF475569)),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFF475569),
+                            ),
                           ),
                           const SizedBox(height: 10),
                           _CompactFormRow(
                             label: 'Account',
-                            field: _compactInput(controller: _filterAccount, hintText: 'Filter by party name'),
+                            field: _compactInput(
+                              controller: _filterAccount,
+                              hintText: 'Filter by party name',
+                            ),
                           ),
-                          _CompactFormRow(label: 'From', field: _dateInput(_fromDate)),
-                          _CompactFormRow(label: 'To', field: _dateInput(_toDate)),
+                          _CompactFormRow(
+                            label: 'From',
+                            field: _dateInput(_fromDate),
+                          ),
+                          _CompactFormRow(
+                            label: 'To',
+                            field: _dateInput(_toDate),
+                          ),
                           FilledButton.icon(
                             onPressed: () => setState(() {}),
                             icon: const Icon(Icons.filter_alt, size: 16),
                             label: const Text('Apply'),
-                            style: FilledButton.styleFrom(backgroundColor: const Color(0xFF1D4ED8)),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF1D4ED8),
+                            ),
                           ),
                         ],
                       ),
@@ -19924,7 +23409,14 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                       expandChild: true,
                       contentPadding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
                       child: _SimpleTable(
-                        headers: const ['Date', 'Voucher', 'Type', 'Debit', 'Credit', 'Balance'],
+                        headers: const [
+                          'Date',
+                          'Voucher',
+                          'Type',
+                          'Debit',
+                          'Credit',
+                          'Balance',
+                        ],
                         selectedIndex: null,
                         rows: tableRows,
                         onRowTap: (_) {},
@@ -19942,13 +23434,54 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
 
   Widget _dayBookScreen() {
     final raw = <Map<String, dynamic>>[
-      ..._records('Receipt').map((e) => {'date': e['date'], 'module': 'Receipt', 'no': e['voucherNo'], 'amount': e['amount']}),
-      ..._records('Payment').map((e) => {'date': e['date'], 'module': 'Payment', 'no': e['voucherNo'], 'amount': e['amount']}),
-      ...salesInvoiceRecords.map((e) => {'date': e['date'], 'module': 'Sales', 'no': e['billNo'], 'amount': e['grandTotal']}),
-      ...purchaseBillRecords.map((e) => {'date': e['date'], 'module': 'Purchase', 'no': e['billNo'], 'amount': e['grandTotal']}),
+      ..._records('Receipt').map(
+        (e) => {
+          'date': e['date'],
+          'module': 'Receipt',
+          'no': e['voucherNo'],
+          'amount': e['amount'],
+        },
+      ),
+      ..._records('Payment').map(
+        (e) => {
+          'date': e['date'],
+          'module': 'Payment',
+          'no': e['voucherNo'],
+          'amount': e['amount'],
+        },
+      ),
+      ...salesInvoiceRecords.map(
+        (e) => {
+          'date': e['date'],
+          'module': 'Sales',
+          'no': e['billNo'],
+          'amount': e['grandTotal'],
+        },
+      ),
+      ...purchaseBillRecords.map(
+        (e) => {
+          'date': e['date'],
+          'module': 'Purchase',
+          'no': e['billNo'],
+          'amount': e['grandTotal'],
+        },
+      ),
     ];
-    final entries = raw.where((e) => _dateInRange((e['date'] ?? '').toString(), _fromDate.text, _toDate.text)).toList()
-      ..sort((a, b) => (b['date'] ?? '').toString().compareTo((a['date'] ?? '').toString()));
+    final entries =
+        raw
+            .where(
+              (e) => _dateInRange(
+                (e['date'] ?? '').toString(),
+                _fromDate.text,
+                _toDate.text,
+              ),
+            )
+            .toList()
+          ..sort(
+            (a, b) => (b['date'] ?? '').toString().compareTo(
+              (a['date'] ?? '').toString(),
+            ),
+          );
 
     return _moduleShell(
       title: 'Day Book',
@@ -19979,7 +23512,8 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 expandChild: true,
                 child: ListView.separated(
                   itemCount: entries.length,
-                  separatorBuilder: (_, __) => Divider(color: Colors.blueGrey.shade100, height: 1),
+                  separatorBuilder: (_, __) =>
+                      Divider(color: Colors.blueGrey.shade100, height: 1),
                   itemBuilder: (context, index) {
                     final e = entries[index];
                     return ListTile(
@@ -19987,7 +23521,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                       leading: CircleAvatar(
                         radius: 14,
                         backgroundColor: const Color(0xFFE0E7FF),
-                        child: Text('${index + 1}', style: const TextStyle(fontSize: 11)),
+                        child: Text(
+                          '${index + 1}',
+                          style: const TextStyle(fontSize: 11),
+                        ),
                       ),
                       title: Text('${e['module']}  •  ${e['no']}'),
                       subtitle: Text((e['date'] ?? '').toString()),
@@ -20013,19 +23550,30 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
     for (final a in accounts) {
       final name = (a['name'] ?? '').toString().trim();
       if (name.isEmpty) continue;
-      map.putIfAbsent(name, () => {'opening': 0, 'debit': 0, 'credit': 0, 'closing': 0});
+      map.putIfAbsent(
+        name,
+        () => {'opening': 0, 'debit': 0, 'credit': 0, 'closing': 0},
+      );
     }
     for (final r in receipt) {
       final acc = (r['account'] ?? '').toString();
       if (acc.isEmpty) continue;
-      map.putIfAbsent(acc, () => {'opening': 0, 'debit': 0, 'credit': 0, 'closing': 0});
-      map[acc]!['debit'] = (map[acc]!['debit'] ?? 0) + ((r['amount'] as num?)?.toDouble() ?? 0);
+      map.putIfAbsent(
+        acc,
+        () => {'opening': 0, 'debit': 0, 'credit': 0, 'closing': 0},
+      );
+      map[acc]!['debit'] =
+          (map[acc]!['debit'] ?? 0) + ((r['amount'] as num?)?.toDouble() ?? 0);
     }
     for (final r in payment) {
       final acc = (r['account'] ?? '').toString();
       if (acc.isEmpty) continue;
-      map.putIfAbsent(acc, () => {'opening': 0, 'debit': 0, 'credit': 0, 'closing': 0});
-      map[acc]!['credit'] = (map[acc]!['credit'] ?? 0) + ((r['amount'] as num?)?.toDouble() ?? 0);
+      map.putIfAbsent(
+        acc,
+        () => {'opening': 0, 'debit': 0, 'credit': 0, 'closing': 0},
+      );
+      map[acc]!['credit'] =
+          (map[acc]!['credit'] ?? 0) + ((r['amount'] as num?)?.toDouble() ?? 0);
     }
     final q = _filterAccount.text.trim().toLowerCase();
     final rows = map.entries
@@ -20035,13 +23583,31 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
           final debit = e.value['debit'] ?? 0;
           final credit = e.value['credit'] ?? 0;
           final closing = opening + debit - credit;
-          return [e.key, opening.toStringAsFixed(2), debit.toStringAsFixed(2), credit.toStringAsFixed(2), closing.toStringAsFixed(2)];
+          return [
+            e.key,
+            opening.toStringAsFixed(2),
+            debit.toStringAsFixed(2),
+            credit.toStringAsFixed(2),
+            closing.toStringAsFixed(2),
+          ];
         })
         .toList();
-    final totalOpening = rows.fold<double>(0, (s, r) => s + (double.tryParse(r[1]) ?? 0));
-    final totalDebit = rows.fold<double>(0, (s, r) => s + (double.tryParse(r[2]) ?? 0));
-    final totalCredit = rows.fold<double>(0, (s, r) => s + (double.tryParse(r[3]) ?? 0));
-    final totalClosing = rows.fold<double>(0, (s, r) => s + (double.tryParse(r[4]) ?? 0));
+    final totalOpening = rows.fold<double>(
+      0,
+      (s, r) => s + (double.tryParse(r[1]) ?? 0),
+    );
+    final totalDebit = rows.fold<double>(
+      0,
+      (s, r) => s + (double.tryParse(r[2]) ?? 0),
+    );
+    final totalCredit = rows.fold<double>(
+      0,
+      (s, r) => s + (double.tryParse(r[3]) ?? 0),
+    );
+    final totalClosing = rows.fold<double>(
+      0,
+      (s, r) => s + (double.tryParse(r[4]) ?? 0),
+    );
     return _moduleShell(
       title: 'Account Balance',
       child: Padding(
@@ -20050,13 +23616,37 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
           children: [
             Row(
               children: [
-                Expanded(child: _statCard('Opening', totalOpening.toStringAsFixed(2), Icons.wallet)),
+                Expanded(
+                  child: _statCard(
+                    'Opening',
+                    totalOpening.toStringAsFixed(2),
+                    Icons.wallet,
+                  ),
+                ),
                 const SizedBox(width: 8),
-                Expanded(child: _statCard('Debit', totalDebit.toStringAsFixed(2), Icons.arrow_downward)),
+                Expanded(
+                  child: _statCard(
+                    'Debit',
+                    totalDebit.toStringAsFixed(2),
+                    Icons.arrow_downward,
+                  ),
+                ),
                 const SizedBox(width: 8),
-                Expanded(child: _statCard('Credit', totalCredit.toStringAsFixed(2), Icons.arrow_upward)),
+                Expanded(
+                  child: _statCard(
+                    'Credit',
+                    totalCredit.toStringAsFixed(2),
+                    Icons.arrow_upward,
+                  ),
+                ),
                 const SizedBox(width: 8),
-                Expanded(child: _statCard('Closing', totalClosing.toStringAsFixed(2), Icons.account_balance)),
+                Expanded(
+                  child: _statCard(
+                    'Closing',
+                    totalClosing.toStringAsFixed(2),
+                    Icons.account_balance,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 10),
@@ -20066,7 +23656,12 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 children: [
                   SizedBox(width: 220, child: _dateInput(_toDate)),
                   const SizedBox(width: 8),
-                  Expanded(child: _compactInput(controller: _filterAccount, hintText: 'Search account')),
+                  Expanded(
+                    child: _compactInput(
+                      controller: _filterAccount,
+                      hintText: 'Search account',
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -20076,7 +23671,13 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                 title: 'Account-wise Summary',
                 expandChild: true,
                 child: _SimpleTable(
-                  headers: const ['Account', 'Opening', 'Debit', 'Credit', 'Closing'],
+                  headers: const [
+                    'Account',
+                    'Opening',
+                    'Debit',
+                    'Credit',
+                    'Closing',
+                  ],
                   selectedIndex: null,
                   rows: rows,
                   onRowTap: (_) {},
@@ -20093,8 +23694,20 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
     final rows = _records('Bank Reconciliation');
     if (rows.isEmpty) {
       rows.addAll([
-        {'date': _today(), 'ref': 'BNK-101', 'system': 1200.0, 'bank': 1200.0, 'status': 'Success'},
-        {'date': _today(), 'ref': 'BNK-102', 'system': 980.0, 'bank': 0.0, 'status': 'Pending'},
+        {
+          'date': _today(),
+          'ref': 'BNK-101',
+          'system': 1200.0,
+          'bank': 1200.0,
+          'status': 'Success',
+        },
+        {
+          'date': _today(),
+          'ref': 'BNK-102',
+          'system': 980.0,
+          'bank': 0.0,
+          'status': 'Pending',
+        },
       ]);
     }
     return _moduleShell(
@@ -20107,7 +23720,12 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
               title: 'Bank Filters',
               child: Row(
                 children: [
-                  Expanded(child: _compactInput(controller: _filterAccount, hintText: 'Bank Account')),
+                  Expanded(
+                    child: _compactInput(
+                      controller: _filterAccount,
+                      hintText: 'Bank Account',
+                    ),
+                  ),
                   const SizedBox(width: 8),
                   Expanded(child: _dateInput(_fromDate)),
                   const SizedBox(width: 8),
@@ -20127,7 +23745,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     final row = rows[index];
                     final matched = (row['status'] ?? '') == 'Success';
                     return Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(10),
@@ -20135,14 +23756,31 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                       ),
                       child: Row(
                         children: [
-                          Expanded(flex: 2, child: Text((row['date'] ?? '').toString())),
-                          Expanded(flex: 2, child: Text((row['ref'] ?? '').toString())),
+                          Expanded(
+                            flex: 2,
+                            child: Text((row['date'] ?? '').toString()),
+                          ),
+                          Expanded(
+                            flex: 2,
+                            child: Text((row['ref'] ?? '').toString()),
+                          ),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text('Books', style: TextStyle(fontSize: 10, color: Colors.blueGrey.shade600)),
-                                Text((row['system'] ?? '').toString(), style: const TextStyle(fontWeight: FontWeight.w600)),
+                                Text(
+                                  'Books',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: Colors.blueGrey.shade600,
+                                  ),
+                                ),
+                                Text(
+                                  (row['system'] ?? '').toString(),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -20150,8 +23788,19 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text('Bank', style: TextStyle(fontSize: 10, color: Colors.blueGrey.shade600)),
-                                Text((row['bank'] ?? '').toString(), style: const TextStyle(fontWeight: FontWeight.w600)),
+                                Text(
+                                  'Bank',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: Colors.blueGrey.shade600,
+                                  ),
+                                ),
+                                Text(
+                                  (row['bank'] ?? '').toString(),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -20168,7 +23817,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                           Text(
                             matched ? 'Matched' : 'Unmatched',
                             style: TextStyle(
-                              color: matched ? const Color(0xFF166534) : const Color(0xFF9A3412),
+                              color: matched
+                                  ? const Color(0xFF166534)
+                                  : const Color(0xFF9A3412),
                               fontWeight: FontWeight.w700,
                             ),
                           ),
@@ -20223,21 +23874,57 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
             const SizedBox(height: 10),
             Row(
               children: [
-                Expanded(child: _statCard('Total sales', totalSales.toStringAsFixed(2), Icons.trending_up)),
+                Expanded(
+                  child: _statCard(
+                    'Total sales',
+                    totalSales.toStringAsFixed(2),
+                    Icons.trending_up,
+                  ),
+                ),
                 const SizedBox(width: 8),
-                Expanded(child: _statCard('Total purchase', totalPurchase.toStringAsFixed(2), Icons.shopping_cart)),
+                Expanded(
+                  child: _statCard(
+                    'Total purchase',
+                    totalPurchase.toStringAsFixed(2),
+                    Icons.shopping_cart,
+                  ),
+                ),
                 const SizedBox(width: 8),
-                Expanded(child: _statCard('Gross profit', tradeProfit.toStringAsFixed(2), Icons.savings)),
+                Expanded(
+                  child: _statCard(
+                    'Gross profit',
+                    tradeProfit.toStringAsFixed(2),
+                    Icons.savings,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 8),
             Row(
               children: [
-                Expanded(child: _statCard('Receipts', receiptTotal.toStringAsFixed(2), Icons.payments)),
+                Expanded(
+                  child: _statCard(
+                    'Receipts',
+                    receiptTotal.toStringAsFixed(2),
+                    Icons.payments,
+                  ),
+                ),
                 const SizedBox(width: 8),
-                Expanded(child: _statCard('Payments', paymentTotal.toStringAsFixed(2), Icons.request_quote)),
+                Expanded(
+                  child: _statCard(
+                    'Payments',
+                    paymentTotal.toStringAsFixed(2),
+                    Icons.request_quote,
+                  ),
+                ),
                 const SizedBox(width: 8),
-                Expanded(child: _statCard('Net position', net.toStringAsFixed(2), Icons.dashboard_customize)),
+                Expanded(
+                  child: _statCard(
+                    'Net position',
+                    net.toStringAsFixed(2),
+                    Icons.dashboard_customize,
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 10),
@@ -20262,23 +23949,35 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text('Net Position', style: TextStyle(fontWeight: FontWeight.w700)),
+                            const Text(
+                              'Net Position',
+                              style: TextStyle(fontWeight: FontWeight.w700),
+                            ),
                             const SizedBox(height: 6),
                             Text(
                               net.toStringAsFixed(2),
-                              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+                              style: const TextStyle(
+                                fontSize: 24,
+                                fontWeight: FontWeight.w800,
+                              ),
                             ),
                             const SizedBox(height: 8),
                             LinearProgressIndicator(
-                              value: (totalSales <= 0) ? 0 : (totalPurchase / totalSales).clamp(0, 1),
+                              value: (totalSales <= 0)
+                                  ? 0
+                                  : (totalPurchase / totalSales).clamp(0, 1),
                               minHeight: 8,
                               borderRadius: BorderRadius.circular(999),
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              net >= 0 ? 'Business is in profit zone' : 'Business is in loss zone',
+                              net >= 0
+                                  ? 'Business is in profit zone'
+                                  : 'Business is in loss zone',
                               style: TextStyle(
-                                color: net >= 0 ? const Color(0xFF166534) : const Color(0xFF991B1B),
+                                color: net >= 0
+                                    ? const Color(0xFF166534)
+                                    : const Color(0xFF991B1B),
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
@@ -20292,11 +23991,31 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                         headers: const ['Report', 'Value', 'Status'],
                         selectedIndex: null,
                         rows: [
-                          ['Total Sales', totalSales.toStringAsFixed(2), 'Success'],
-                          ['Total Purchase', totalPurchase.toStringAsFixed(2), 'Success'],
-                          ['Receipts', receiptTotal.toStringAsFixed(2), 'Success'],
-                          ['Payments', paymentTotal.toStringAsFixed(2), 'Success'],
-                          ['Net Profit / Loss', net.toStringAsFixed(2), net >= 0 ? 'Success' : 'Danger'],
+                          [
+                            'Total Sales',
+                            totalSales.toStringAsFixed(2),
+                            'Success',
+                          ],
+                          [
+                            'Total Purchase',
+                            totalPurchase.toStringAsFixed(2),
+                            'Success',
+                          ],
+                          [
+                            'Receipts',
+                            receiptTotal.toStringAsFixed(2),
+                            'Success',
+                          ],
+                          [
+                            'Payments',
+                            paymentTotal.toStringAsFixed(2),
+                            'Success',
+                          ],
+                          [
+                            'Net Profit / Loss',
+                            net.toStringAsFixed(2),
+                            net >= 0 ? 'Success' : 'Danger',
+                          ],
                         ],
                         onRowTap: (_) {},
                       ),
@@ -20360,13 +24079,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     const Expanded(
                       child: Text(
                         'Cr / Dr Note register',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
                       ),
                     ),
                     if (widget.onClose != null)
                       IconButton(
                         onPressed: widget.onClose,
-                        icon: const Icon(Icons.close, color: Colors.white70, size: 16),
+                        icon: const Icon(
+                          Icons.close,
+                          color: Colors.white70,
+                          size: 16,
+                        ),
                       ),
                   ],
                 ),
@@ -20378,7 +24105,14 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     title: 'From Invoice module (Credit / Debit Note)',
                     expandChild: true,
                     child: _SimpleTable(
-                      headers: const ['Note No', 'Date', 'Type', 'Account', 'Amount', 'Reason'],
+                      headers: const [
+                        'Note No',
+                        'Date',
+                        'Type',
+                        'Account',
+                        'Amount',
+                        'Reason',
+                      ],
                       selectedIndex: null,
                       rows: creditDebitNotes
                           .map(
@@ -20414,13 +24148,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     const Expanded(
                       child: Text(
                         'Stock transfer register',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
                       ),
                     ),
                     if (widget.onClose != null)
                       IconButton(
                         onPressed: widget.onClose,
-                        icon: const Icon(Icons.close, color: Colors.white70, size: 16),
+                        icon: const Icon(
+                          Icons.close,
+                          color: Colors.white70,
+                          size: 16,
+                        ),
                       ),
                   ],
                 ),
@@ -20432,7 +24174,14 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     title: 'From Inventory → Stock Transfer',
                     expandChild: true,
                     child: _SimpleTable(
-                      headers: const ['No', 'Date', 'From', 'To', 'Items', 'Total Qty'],
+                      headers: const [
+                        'No',
+                        'Date',
+                        'From',
+                        'To',
+                        'Items',
+                        'Total Qty',
+                      ],
                       selectedIndex: null,
                       rows: stockTransferRecords
                           .map(
@@ -20482,13 +24231,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     const Expanded(
                       child: Text(
                         'Interest on outstanding',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
                       ),
                     ),
                     if (widget.onClose != null)
                       IconButton(
                         onPressed: widget.onClose,
-                        icon: const Icon(Icons.close, color: Colors.white70, size: 16),
+                        icon: const Icon(
+                          Icons.close,
+                          color: Colors.white70,
+                          size: 16,
+                        ),
                       ),
                   ],
                 ),
@@ -20512,17 +24269,25 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                             ),
                             _CompactFormRow(
                               label: 'Rate % p.a.',
-                              field: _compactInput(controller: _interestRate, keyboardType: TextInputType.number),
+                              field: _compactInput(
+                                controller: _interestRate,
+                                keyboardType: TextInputType.number,
+                              ),
                             ),
                             _CompactFormRow(
                               label: 'Duration (days)',
-                              field: _compactInput(controller: _interestDuration, keyboardType: TextInputType.number),
+                              field: _compactInput(
+                                controller: _interestDuration,
+                                keyboardType: TextInputType.number,
+                              ),
                             ),
                             Align(
                               alignment: Alignment.centerRight,
                               child: FilledButton(
                                 onPressed: () => setState(() {}),
-                                style: FilledButton.styleFrom(backgroundColor: const Color(0xFFBE123C)),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFFBE123C),
+                                ),
                                 child: const Text('Calculate'),
                               ),
                             ),
@@ -20535,7 +24300,13 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                           title: 'Result',
                           expandChild: true,
                           child: _SimpleTable(
-                            headers: const ['Party', 'Outstanding', 'Rate × days', 'Interest', 'Note'],
+                            headers: const [
+                              'Party',
+                              'Outstanding',
+                              'Rate × days',
+                              'Interest',
+                              'Note',
+                            ],
                             selectedIndex: null,
                             rows: interestRows,
                             onRowTap: (_) {},
@@ -20550,7 +24321,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
           ),
         );
       case 'Currency Reconciliation':
-        final systemInr = _records('Receipt').fold<double>(0, (s, r) => s + ((r['amount'] as num?)?.toDouble() ?? 0));
+        final systemInr = _records('Receipt').fold<double>(
+          0,
+          (s, r) => s + ((r['amount'] as num?)?.toDouble() ?? 0),
+        );
         final physical = double.tryParse(_physicalCashCount.text) ?? 0;
         final rateFx = double.tryParse(_forexRate.text) ?? 1;
         final diffInr = physical - systemInr;
@@ -20568,13 +24342,21 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                     const Expanded(
                       child: Text(
                         'Currency reconciliation',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 14,
+                        ),
                       ),
                     ),
                     if (widget.onClose != null)
                       IconButton(
                         onPressed: widget.onClose,
-                        icon: const Icon(Icons.close, color: Colors.white70, size: 16),
+                        icon: const Icon(
+                          Icons.close,
+                          color: Colors.white70,
+                          size: 16,
+                        ),
                       ),
                   ],
                 ),
@@ -20592,7 +24374,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              _CompactFormRow(label: 'As on', field: _dateInput(_toDate)),
+                              _CompactFormRow(
+                                label: 'As on',
+                                field: _dateInput(_toDate),
+                              ),
                               _CompactFormRow(
                                 label: 'Books (receipts)',
                                 field: SizedBox(
@@ -20601,7 +24386,10 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                     alignment: Alignment.centerLeft,
                                     child: Text(
                                       systemInr.toStringAsFixed(2),
-                                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 14,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -20626,7 +24414,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                       style: TextStyle(
                                         fontWeight: FontWeight.w800,
                                         fontSize: 15,
-                                        color: diffInr == 0 ? const Color(0xFF166534) : const Color(0xFF9A3412),
+                                        color: diffInr == 0
+                                            ? const Color(0xFF166534)
+                                            : const Color(0xFF9A3412),
                                       ),
                                     ),
                                   ),
@@ -20649,7 +24439,9 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                                     alignment: Alignment.centerLeft,
                                     child: Text(
                                       usdEquiv.toStringAsFixed(2),
-                                      style: const TextStyle(fontWeight: FontWeight.w600),
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -20664,10 +24456,24 @@ class _AccountModuleScreenState extends State<AccountModuleScreen> {
                           title: 'Adjustment log',
                           expandChild: true,
                           child: _SimpleTable(
-                            headers: const ['Date', 'Reference', 'Account', 'Amount', 'Status'],
+                            headers: const [
+                              'Date',
+                              'Reference',
+                              'Account',
+                              'Amount',
+                              'Status',
+                            ],
                             selectedIndex: null,
                             rows: _records('Currency Reconciliation')
-                                .map((r) => [(r['date'] ?? _today()).toString(), (r['ref'] ?? 'N/A').toString(), (r['account'] ?? '').toString(), (r['amount'] ?? '0').toString(), (r['status'] ?? 'Pending').toString()])
+                                .map(
+                                  (r) => [
+                                    (r['date'] ?? _today()).toString(),
+                                    (r['ref'] ?? 'N/A').toString(),
+                                    (r['account'] ?? '').toString(),
+                                    (r['amount'] ?? '0').toString(),
+                                    (r['status'] ?? 'Pending').toString(),
+                                  ],
+                                )
                                 .toList(),
                             onRowTap: (_) {},
                           ),
@@ -20757,6 +24563,7 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
   final _discountPercentController = TextEditingController(text: '0');
   final _discountAmountController = TextEditingController(text: '0');
   final _schemeDiscountController = TextEditingController(text: '0');
+  final _barcodeController = TextEditingController();
 
   final _productSearchController = TextEditingController();
   final _packController = TextEditingController();
@@ -20784,22 +24591,35 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
   final _freeFocus = FocusNode();
   final _rateFocus = FocusNode();
   final _discountAmountFocus = FocusNode();
+  final _barcodeFocus = FocusNode();
 
   final List<Map<String, dynamic>> _invoiceItems = [];
   Map<String, dynamic>? _selectedProduct;
   int? _selectedRowIndex;
   int? _selectedRecordIndex;
+
   /// When editing an existing saved invoice/bill, reuse this document id.
   int? _editingDocumentId;
   bool _manualBillNo = false;
   String _gstType = 'GST Local';
 
+  Timer? _partyBalanceDebounce;
+  Timer? _partyHeaderDebounce;
+  double? _partySqlLedger;
+  double? _partySqlPending;
+
+  void _onPartyFieldChanged() {
+    _schedulePartyBalanceRefresh();
+    _partyHeaderDebounce?.cancel();
+    _partyHeaderDebounce = Timer(const Duration(milliseconds: 120), () {
+      if (mounted) setState(() {});
+    });
+  }
+
   @override
   void initState() {
     super.initState();
-    _partyController.addListener(() {
-      if (mounted) setState(() {});
-    });
+    _partyController.addListener(_onPartyFieldChanged);
     _qtyController.addListener(() {
       if (mounted) setState(() {});
     });
@@ -20814,7 +24634,9 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
     _billingSeriesController.dispose();
     _billNoController.dispose();
     _dateController.dispose();
+    _partyController.removeListener(_onPartyFieldChanged);
     _partyController.dispose();
+    _partyHeaderDebounce?.cancel();
     _doctorController.dispose();
     _patientController.dispose();
     _addressController.dispose();
@@ -20822,6 +24644,7 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
     _discountPercentController.dispose();
     _discountAmountController.dispose();
     _schemeDiscountController.dispose();
+    _barcodeController.dispose();
     _productSearchController.dispose();
     _packController.dispose();
     _batchController.dispose();
@@ -20847,6 +24670,8 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
     _freeFocus.dispose();
     _rateFocus.dispose();
     _discountAmountFocus.dispose();
+    _barcodeFocus.dispose();
+    _partyBalanceDebounce?.cancel();
     super.dispose();
   }
 
@@ -20858,7 +24683,8 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
   }
 
   Future<void> _pickInvoiceDate() async {
-    final initial = DateTime.tryParse(_dateController.text.trim()) ?? DateTime.now();
+    final initial =
+        DateTime.tryParse(_dateController.text.trim()) ?? DateTime.now();
     final picked = await showDatePicker(
       context: context,
       initialDate: initial,
@@ -20892,6 +24718,7 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
 
   void _resetEntryRow() {
     _selectedProduct = null;
+    _barcodeController.clear();
     _productSearchController.clear();
     _packController.clear();
     _batchController.clear();
@@ -20951,16 +24778,44 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
     return 0;
   }
 
+  Map<String, double> _salesByCustomerLower() {
+    final map = <String, double>{};
+    for (final inv in salesInvoiceRecords) {
+      final key = (inv['party'] ?? '').toString().trim().toLowerCase();
+      if (key.isEmpty) continue;
+      map[key] = (map[key] ?? 0) + _toDouble(inv['grandTotal']);
+    }
+    return map;
+  }
+
+  Map<String, double> _soldQtyByProductId() {
+    final out = <String, double>{};
+    for (final inv in salesInvoiceRecords) {
+      final items = (inv['items'] as List?) ?? const [];
+      for (final raw in items) {
+        if (raw is! Map) continue;
+        final row = Map<String, dynamic>.from(raw);
+        final id = (row['productId'] ?? '').toString();
+        if (id.isEmpty) continue;
+        out[id] =
+            (out[id] ?? 0) + _toDouble(row['qty']) + _toDouble(row['free']);
+      }
+    }
+    return out;
+  }
+
   Iterable<Map<String, dynamic>> _findAccounts(String text) {
     final q = text.trim();
+    final customerStrength = _salesByCustomerLower();
     final matches =
         accounts
-            .map(
-              (row) => {
-                'row': row,
-                'score': _fuzzyScore(q, (row['name'] ?? '').toString()),
-              },
-            )
+            .map((row) {
+              final name = (row['name'] ?? '').toString();
+              var score = _fuzzyScore(q, name);
+              score += ((customerStrength[name.toLowerCase()] ?? 0) / 500)
+                  .round();
+              return {'row': row, 'score': score};
+            })
             .where((x) => x['score'] as int > 0)
             .toList()
           ..sort((a, b) => (b['score'] as int).compareTo(a['score'] as int));
@@ -20985,18 +24840,55 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
 
   Iterable<Map<String, dynamic>> _findProducts(String text) {
     final q = text.trim();
+    final soldQty = _soldQtyByProductId();
     final matches =
         products
-            .map(
-              (row) => {
-                'row': row,
-                'score': _fuzzyScore(q, (row['name'] ?? '').toString()),
-              },
-            )
+            .map((row) {
+              final name = (row['name'] ?? '').toString();
+              final barcode = (row['barcode'] ?? '').toString();
+              var score = _fuzzyScore(q, name);
+              if (q.isNotEmpty && barcode.toLowerCase() == q.toLowerCase()) {
+                score += 1200;
+              } else if (q.isNotEmpty &&
+                  barcode.toLowerCase().contains(q.toLowerCase())) {
+                score += 400;
+              }
+              score += ((soldQty[(row['id'] ?? '').toString()] ?? 0) / 2)
+                  .round();
+              return {'row': row, 'score': score};
+            })
             .where((x) => x['score'] as int > 0)
             .toList()
           ..sort((a, b) => (b['score'] as int).compareTo(a['score'] as int));
     return matches.take(10).map((x) => x['row'] as Map<String, dynamic>);
+  }
+
+  List<Map<String, dynamic>> _recommendedProductsForParty(String party) {
+    final key = party.trim().toLowerCase();
+    if (key.isEmpty) return const [];
+    final byProduct = <String, double>{};
+    for (final inv in salesInvoiceRecords) {
+      if ((inv['party'] ?? '').toString().trim().toLowerCase() != key) continue;
+      final items = (inv['items'] as List?) ?? const [];
+      for (final raw in items) {
+        if (raw is! Map) continue;
+        final row = Map<String, dynamic>.from(raw);
+        final id = (row['productId'] ?? '').toString();
+        if (id.isEmpty) continue;
+        byProduct[id] = (byProduct[id] ?? 0) + _toDouble(row['qty']);
+      }
+    }
+    final ranked = byProduct.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final out = <Map<String, dynamic>>[];
+    for (final entry in ranked.take(5)) {
+      final p = products.cast<Map<String, dynamic>?>().firstWhere(
+        (x) => (x?['id'] ?? '').toString() == entry.key,
+        orElse: () => null,
+      );
+      if (p != null) out.add(p);
+    }
+    return out;
   }
 
   void _applyProductSelection(Map<String, dynamic> row) {
@@ -21005,10 +24897,40 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
     _packController.text = (row['salesPack'] ?? row['purPack'] ?? '')
         .toString();
     _batchController.text = (row['batch'] ?? row['barcode'] ?? '').toString();
-    _expiryController.text = (row['expiry'] ?? '').toString();
+    _expiryController.text = (row['expiryDate'] ?? row['expiry'] ?? '')
+        .toString();
     _rateController.text = widget.isPurchase
         ? (row['purRate'] ?? row['wRate'] ?? row['mrp'] ?? '0').toString()
         : (row['saleRate'] ?? row['wRate'] ?? row['mrp'] ?? '0').toString();
+  }
+
+  Map<String, dynamic>? _findProductByBarcode(String barcode) {
+    final key = barcode.trim().toLowerCase();
+    if (key.isEmpty) return null;
+    for (final row in products) {
+      final code = (row['barcode'] ?? '').toString().trim().toLowerCase();
+      if (code.isNotEmpty && code == key) {
+        return row;
+      }
+    }
+    return null;
+  }
+
+  void _tryAddFromBarcode() {
+    final match = _findProductByBarcode(_barcodeController.text);
+    if (match == null) {
+      _showMessage('Barcode not found');
+      return;
+    }
+    setState(() {
+      _applyProductSelection(match);
+      _qtyController.text = '1';
+      _freeController.text = '0';
+      _selectedRowIndex = null;
+    });
+    _commitEntryRow();
+    _barcodeController.clear();
+    _barcodeFocus.requestFocus();
   }
 
   double _parseGstPercent(dynamic raw, {double fallback = 12}) {
@@ -21026,9 +24948,8 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
               '12',
         );
 
-  double get _selectedProductStock => _selectedProduct == null
-      ? 0
-      : _toDouble(_selectedProduct!['stock']);
+  double get _selectedProductStock =>
+      _selectedProduct == null ? 0 : _toDouble(_selectedProduct!['stock']);
 
   double get _entryDemandQty =>
       _toDouble(_qtyController.text) + _toDouble(_freeController.text);
@@ -21056,7 +24977,8 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
   double _lineTax(Map<String, dynamic> row) =>
       _lineAmount(row) * (_toDouble(row['gstPercent']) / 100);
 
-  double _lineTotal(Map<String, dynamic> row) => _lineAmount(row) + _lineTax(row);
+  double _lineTotal(Map<String, dynamic> row) =>
+      _lineAmount(row) + _lineTax(row);
 
   int get _totalItemsCount => _invoiceItems.length;
   double get _totalQty =>
@@ -21100,7 +25022,9 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
     final qty = _toDouble(_qtyController.text);
     final free = _toDouble(_freeController.text);
     final rate = _toDouble(_rateController.text);
-    final gstPercent = _selectedProduct == null ? 12.0 : _selectedProductGstPercent;
+    final gstPercent = _selectedProduct == null
+        ? 12.0
+        : _selectedProductGstPercent;
 
     if (name.isEmpty || _selectedProduct == null) {
       _showMessage('Select product from suggestion');
@@ -21182,14 +25106,26 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
     });
   }
 
+  int? _accountIdForPartyName(String party) {
+    final p = party.trim().toLowerCase();
+    if (p.isEmpty) return null;
+    for (final a in accounts) {
+      final n = (a['name'] ?? '').toString().trim().toLowerCase();
+      if (n == p) return a['id'] as int?;
+    }
+    return null;
+  }
+
   Map<String, dynamic> _buildDocument() {
+    final party = _partyController.text.trim();
     return {
       'id': _editingDocumentId ?? DateTime.now().microsecondsSinceEpoch,
       'module': widget.title,
       'series': _billingSeriesController.text.trim(),
       'billNo': _billNoController.text.trim(),
       'date': _dateController.text.trim(),
-      'party': _partyController.text.trim(),
+      'party': party,
+      'accountId': _accountIdForPartyName(party),
       'doctor': _doctorController.text.trim(),
       'patient': _patientController.text.trim(),
       'gstType': _gstType,
@@ -21349,6 +25285,18 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
       return;
     }
 
+    try {
+      await syncSalesOrPurchaseDocumentToRelational(
+        document,
+        previousDoc: previousDoc,
+        isPurchase: widget.isPurchase,
+      );
+    } catch (e) {
+      if (mounted) {
+        _showMessage('Saved (JSON). SQL invoice/stock sync failed: $e');
+      }
+    }
+
     setState(() {
       if (_selectedRecordIndex != null &&
           _selectedRecordIndex! >= 0 &&
@@ -21405,8 +25353,344 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
     setState(_resetForm);
   }
 
+  String _currencySymbol() {
+    final c = (globalMedicalStoreSettings['currency'] ?? 'INR')
+        .toString()
+        .toUpperCase();
+    switch (c) {
+      case 'USD':
+        return r'$';
+      case 'EUR':
+        return 'EUR';
+      default:
+        return '₹';
+    }
+  }
+
+  Map<String, dynamic>? _activePrintableDocument() {
+    if (_invoiceItems.isNotEmpty) {
+      return _buildDocument();
+    }
+    if (_selectedRecordIndex != null &&
+        _selectedRecordIndex! >= 0 &&
+        _selectedRecordIndex! < widget.records.length) {
+      return Map<String, dynamic>.from(widget.records[_selectedRecordIndex!]);
+    }
+    return null;
+  }
+
+  String _buildInvoicePrintText(Map<String, dynamic> doc) {
+    final lines = <String>[];
+    final storeName =
+        (globalMedicalStoreSettings['storeName'] ?? 'Health+ Medical Store')
+            .toString();
+    final owner = (globalMedicalStoreSettings['ownerName'] ?? '').toString();
+    final address = (globalMedicalStoreSettings['address'] ?? '').toString();
+    final phone = (globalMedicalStoreSettings['phone'] ?? '').toString();
+    final gst = (globalMedicalStoreSettings['gstNumber'] ?? '').toString();
+    final currency = _currencySymbol();
+    lines.add(storeName);
+    if (owner.isNotEmpty) lines.add('Owner: $owner');
+    if (address.isNotEmpty) lines.add('Address: $address');
+    if (phone.isNotEmpty) lines.add('Phone: $phone');
+    if (gst.isNotEmpty) lines.add('GSTIN: $gst');
+    lines.add('');
+    lines.add('${widget.title}  •  Bill No: ${doc['billNo'] ?? '-'}');
+    lines.add('Date: ${doc['date'] ?? '-'}');
+    lines.add('Customer: ${doc['party'] ?? '-'}');
+    lines.add('Doctor: ${doc['doctor'] ?? '-'}');
+    lines.add('');
+    lines.add('Items');
+    lines.add('------------------------------------------------------------');
+    final items = (doc['items'] as List?) ?? const [];
+    for (final raw in items) {
+      if (raw is! Map) continue;
+      final r = Map<String, dynamic>.from(raw);
+      final name = (r['productName'] ?? '-').toString();
+      final qty = _toDouble(r['qty']).toStringAsFixed(2);
+      final rate = _toDouble(r['rate']).toStringAsFixed(2);
+      final total = (_toDouble(r['qty']) * _toDouble(r['rate']))
+          .toStringAsFixed(2);
+      lines.add('$name  | Qty $qty x $rate = $currency$total');
+    }
+    lines.add('------------------------------------------------------------');
+    lines.add(
+      'Sub Total: $currency${_toDouble(doc['subTotal']).toStringAsFixed(2)}',
+    );
+    lines.add('CGST: $currency${_toDouble(doc['cgst']).toStringAsFixed(2)}');
+    lines.add('SGST: $currency${_toDouble(doc['sgst']).toStringAsFixed(2)}');
+    lines.add('IGST: $currency${_toDouble(doc['igst']).toStringAsFixed(2)}');
+    lines.add(
+      'Round Off: $currency${_toDouble(doc['roundOff']).toStringAsFixed(2)}',
+    );
+    lines.add(
+      'Grand Total: $currency${_toDouble(doc['grandTotal']).toStringAsFixed(2)}',
+    );
+    return lines.join('\n');
+  }
+
+  Future<void> _downloadPdfSimulation(Map<String, dynamic> doc) async {
+    final printable = _buildInvoicePrintText(doc);
+    await Clipboard.setData(ClipboardData(text: printable));
+    if (!mounted) return;
+    _showMessage('PDF text copied (simulated download)');
+  }
+
+  Future<void> _showInvoicePrintPreview(Map<String, dynamic> doc) async {
+    final currency = _currencySymbol();
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        final items = (doc['items'] as List?) ?? const [];
+        return Dialog(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 860, maxHeight: 640),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    (globalMedicalStoreSettings['storeName'] ??
+                            'Health+ Medical Store')
+                        .toString(),
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'GST: ${(globalMedicalStoreSettings['gstNumber'] ?? '-').toString()}  •  '
+                    'Phone: ${(globalMedicalStoreSettings['phone'] ?? '-').toString()}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF475569),
+                    ),
+                  ),
+                  Text(
+                    'Address: ${(globalMedicalStoreSettings['address'] ?? '-').toString()}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF475569),
+                    ),
+                  ),
+                  const Divider(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Bill: ${doc['billNo'] ?? '-'}',
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      Text(
+                        'Date: ${doc['date'] ?? '-'}',
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Customer: ${doc['party'] ?? '-'}',
+                    style: const TextStyle(fontSize: 12.2),
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        border: Border.all(color: const Color(0xFFE2E8F0)),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Column(
+                        children: [
+                          Container(
+                            height: 34,
+                            color: const Color(0xFFF1F5F9),
+                            child: const Row(
+                              children: [
+                                Expanded(
+                                  flex: 4,
+                                  child: _TableHeaderText('Product'),
+                                ),
+                                Expanded(child: _TableHeaderText('Qty')),
+                                Expanded(child: _TableHeaderText('Rate')),
+                                Expanded(child: _TableHeaderText('GST%')),
+                                Expanded(child: _TableHeaderText('Total')),
+                              ],
+                            ),
+                          ),
+                          Expanded(
+                            child: ListView.builder(
+                              itemCount: items.length,
+                              itemBuilder: (context, index) {
+                                final row = Map<String, dynamic>.from(
+                                  items[index] as Map,
+                                );
+                                final lineTotal =
+                                    (_toDouble(row['qty']) *
+                                        _toDouble(row['rate'])) +
+                                    ((_toDouble(row['qty']) *
+                                            _toDouble(row['rate'])) *
+                                        (_toDouble(row['gstPercent']) / 100));
+                                return Container(
+                                  height: 30,
+                                  color: index.isEven
+                                      ? Colors.white
+                                      : const Color(0xFFF8FAFC),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        flex: 4,
+                                        child: _TableValueText(
+                                          (row['productName'] ?? '-')
+                                              .toString(),
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: _TableValueText(
+                                          _toDouble(
+                                            row['qty'],
+                                          ).toStringAsFixed(2),
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: _TableValueText(
+                                          _toDouble(
+                                            row['rate'],
+                                          ).toStringAsFixed(2),
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: _TableValueText(
+                                          _toDouble(
+                                            row['gstPercent'],
+                                          ).toStringAsFixed(2),
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: _TableValueText(
+                                          lineTotal.toStringAsFixed(2),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: SizedBox(
+                      width: 260,
+                      child: Column(
+                        children: [
+                          _summaryLine(
+                            'Sub Total',
+                            _toDouble(doc['subTotal']).toStringAsFixed(2),
+                            currency,
+                          ),
+                          _summaryLine(
+                            'CGST',
+                            _toDouble(doc['cgst']).toStringAsFixed(2),
+                            currency,
+                          ),
+                          _summaryLine(
+                            'SGST',
+                            _toDouble(doc['sgst']).toStringAsFixed(2),
+                            currency,
+                          ),
+                          _summaryLine(
+                            'IGST',
+                            _toDouble(doc['igst']).toStringAsFixed(2),
+                            currency,
+                          ),
+                          const Divider(height: 12),
+                          _summaryLine(
+                            'Grand Total',
+                            _toDouble(doc['grandTotal']).toStringAsFixed(2),
+                            currency,
+                            strong: true,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: () => Navigator.of(dialogContext).pop(),
+                        icon: const Icon(Icons.close),
+                        label: const Text('Close'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => _downloadPdfSimulation(doc),
+                        icon: const Icon(Icons.picture_as_pdf_outlined),
+                        label: const Text('Download PDF'),
+                      ),
+                      FilledButton.icon(
+                        onPressed: () {
+                          Navigator.of(dialogContext).pop();
+                          _showMessage('Invoice sent to printer');
+                        },
+                        icon: const Icon(Icons.print),
+                        label: const Text('Print Invoice'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _summaryLine(
+    String title,
+    String value,
+    String currency, {
+    bool strong = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Row(
+        children: [
+          Expanded(child: Text(title, style: const TextStyle(fontSize: 12))),
+          Text(
+            '$currency$value',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: strong ? FontWeight.w800 : FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _onPrint() {
-    _showMessage('Print command sent');
+    final doc = _activePrintableDocument();
+    if (doc == null) {
+      _showMessage('No invoice available for print');
+      return;
+    }
+    unawaited(_showInvoicePrintPreview(doc));
   }
 
   void _onClear() {
@@ -21480,6 +25764,91 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
         ..addAll(items.map((x) => Map<String, dynamic>.from(x as Map)));
       _resetEntryRow();
     });
+    _schedulePartyBalanceRefresh();
+  }
+
+  Map<String, dynamic>? _accountRowMatchingParty(String name) {
+    final k = name.trim().toLowerCase();
+    if (k.isEmpty) return null;
+    for (final a in accounts) {
+      if ((a['name'] ?? '').toString().trim().toLowerCase() == k) {
+        return Map<String, dynamic>.from(a);
+      }
+    }
+    return null;
+  }
+
+  void _schedulePartyBalanceRefresh() {
+    _partyBalanceDebounce?.cancel();
+    _partyBalanceDebounce = Timer(const Duration(milliseconds: 280), () {
+      unawaited(_fetchPartyBalance());
+    });
+  }
+
+  Future<void> _fetchPartyBalance() async {
+    final name = _partyController.text.trim();
+    if (name.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _partySqlLedger = null;
+          _partySqlPending = null;
+        });
+      }
+      return;
+    }
+    final acc = _accountRowMatchingParty(name);
+    if (acc == null) {
+      if (mounted) {
+        setState(() {
+          _partySqlLedger = null;
+          _partySqlPending = _fallbackPartyPending();
+        });
+      }
+      return;
+    }
+    final br = await medAccountBalanceBreakdown(acc);
+    if (!mounted) return;
+    setState(() {
+      _partySqlLedger = br['ledger'];
+      _partySqlPending = widget.isPurchase
+          ? (br['pendingPay'] ?? 0)
+          : (br['pendingRec'] ?? 0);
+    });
+  }
+
+  double _supplierPendingBalanceApprox(String party) {
+    final key = party.trim().toLowerCase();
+    if (key.isEmpty) return 0;
+    var opening = 0.0;
+    for (final a in accounts) {
+      if ((a['name'] ?? '').toString().trim().toLowerCase() == key) {
+        opening = _toDouble(a['openingBalance']);
+        break;
+      }
+    }
+    var pur = 0.0;
+    for (final inv in purchaseBillRecords) {
+      if ((inv['party'] ?? '').toString().trim().toLowerCase() != key) continue;
+      pur += _toDouble(inv['grandTotal']);
+    }
+    var pay = 0.0;
+    for (final r
+        in accountModuleRecords['Payment'] ?? const <Map<String, dynamic>>[]) {
+      if ((r['account'] ?? '').toString().trim().toLowerCase() != key) {
+        continue;
+      }
+      pay += _toDouble(r['amount']);
+    }
+    return (opening + pur - pay).clamp(0.0, double.infinity);
+  }
+
+  double _fallbackPartyPending() {
+    if (widget.isPurchase) {
+      return _supplierPendingBalanceApprox(_partyController.text);
+    }
+    return _customerPendingBalance(
+      _partyController.text,
+    ).clamp(0.0, double.infinity);
   }
 
   double _customerPendingBalance(String party) {
@@ -21491,7 +25860,8 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
       salesTotal += _toDouble(inv['grandTotal']);
     }
     var receiptTotal = 0.0;
-    for (final r in accountModuleRecords['Receipt'] ?? const <Map<String, dynamic>>[]) {
+    for (final r
+        in accountModuleRecords['Receipt'] ?? const <Map<String, dynamic>>[]) {
       if ((r['account'] ?? '').toString().trim().toLowerCase() != key) continue;
       receiptTotal += _toDouble(r['amount']);
     }
@@ -21510,6 +25880,39 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
       }
     }
     return best.isEmpty ? '-' : best;
+  }
+
+  double _customerTotalPurchase(String party) {
+    final key = party.trim().toLowerCase();
+    if (key.isEmpty) return 0;
+    var salesTotal = 0.0;
+    for (final inv in salesInvoiceRecords) {
+      if ((inv['party'] ?? '').toString().trim().toLowerCase() != key) continue;
+      salesTotal += _toDouble(inv['grandTotal']);
+    }
+    return salesTotal;
+  }
+
+  List<Map<String, dynamic>> _customerLastInvoices(
+    String party, {
+    int take = 3,
+  }) {
+    final key = party.trim().toLowerCase();
+    if (key.isEmpty) return const [];
+    final entries =
+        salesInvoiceRecords
+            .where(
+              (inv) =>
+                  (inv['party'] ?? '').toString().trim().toLowerCase() == key,
+            )
+            .map((inv) => Map<String, dynamic>.from(inv))
+            .toList()
+          ..sort(
+            (a, b) => (b['date'] ?? '').toString().compareTo(
+              (a['date'] ?? '').toString(),
+            ),
+          );
+    return entries.take(take).toList();
   }
 
   Widget _buildAutoField({
@@ -21650,27 +26053,42 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
                       focusNode: _dateFocus,
                       readOnly: true,
                       onTap: _pickInvoiceDate,
-                      style: const TextStyle(fontSize: 12.5, color: Color(0xFF0F172A)),
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        color: Color(0xFF0F172A),
+                      ),
                       decoration: InputDecoration(
                         isDense: true,
                         suffixIcon: IconButton(
                           icon: const Icon(Icons.calendar_month, size: 18),
                           onPressed: _pickInvoiceDate,
                         ),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 11,
+                          vertical: 10,
+                        ),
                         filled: true,
                         fillColor: Colors.white,
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(10),
-                          borderSide: const BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                          borderSide: const BorderSide(
+                            color: Color(0xFFCBD5E1),
+                            width: 1,
+                          ),
                         ),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(10),
-                          borderSide: const BorderSide(color: Color(0xFFCBD5E1), width: 1),
+                          borderSide: const BorderSide(
+                            color: Color(0xFFCBD5E1),
+                            width: 1,
+                          ),
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(10),
-                          borderSide: const BorderSide(color: Color(0xFF6366F1), width: 1.6),
+                          borderSide: const BorderSide(
+                            color: Color(0xFF6366F1),
+                            width: 1.6,
+                          ),
                         ),
                       ),
                     ),
@@ -21690,7 +26108,8 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
                   display: (x) => (x['name'] ?? '').toString(),
                   onSelected: (selected) {
                     setState(() {
-                      _partyController.text = (selected['name'] ?? '').toString();
+                      _partyController.text = (selected['name'] ?? '')
+                          .toString();
                       _mobileController.text = (selected['mobile'] ?? '')
                           .toString();
                       _addressController.text =
@@ -21724,31 +26143,89 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
                   decoration: BoxDecoration(
                     color: const Color(0xFFEFF6FF),
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: const Color(0xFFBFDBFE)),
                   ),
-                  child: Wrap(
-                    spacing: 14,
-                    runSpacing: 4,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      Wrap(
+                        spacing: 14,
+                        runSpacing: 4,
+                        children: [
+                          Text(
+                            'Total purchase: ₹ ${_customerTotalPurchase(_partyController.text).toStringAsFixed(2)}',
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF0F766E),
+                            ),
+                          ),
+                          Text(
+                            '${widget.isPurchase ? 'Amount payable' : 'Pending (recv.)'}: ₹ ${(_partySqlPending ?? _fallbackPartyPending()).toStringAsFixed(2)}',
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF1D4ED8),
+                            ),
+                          ),
+                          if (_partySqlLedger != null)
+                            Text(
+                              'Ledger: ₹ ${_partySqlLedger!.toStringAsFixed(2)}',
+                              style: const TextStyle(
+                                fontSize: 11.2,
+                                fontWeight: FontWeight.w500,
+                                color: Color(0xFF475569),
+                              ),
+                            ),
+                          Text(
+                            'Last purchase: ${_customerLastPurchase(_partyController.text)}',
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF334155),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
                       Text(
-                        'Pending balance: ${_customerPendingBalance(_partyController.text).toStringAsFixed(2)}',
+                        'Last 3 invoices: ${_customerLastInvoices(_partyController.text).map((e) => "${e['billNo'] ?? '-'} (${e['date'] ?? '-'})").join('  |  ').isEmpty ? '-' : _customerLastInvoices(_partyController.text).map((e) => "${e['billNo'] ?? '-'} (${e['date'] ?? '-'})").join('  |  ')}',
                         style: const TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF1D4ED8),
+                          fontSize: 11.2,
+                          fontWeight: FontWeight.w500,
+                          color: Color(0xFF334155),
                         ),
                       ),
-                      Text(
-                        'Last purchase: ${_customerLastPurchase(_partyController.text)}',
-                        style: const TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF0F766E),
-                        ),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children:
+                            _recommendedProductsForParty(_partyController.text)
+                                .map(
+                                  (p) => ActionChip(
+                                    avatar: const Icon(
+                                      Icons.auto_awesome,
+                                      size: 14,
+                                    ),
+                                    label: Text(
+                                      (p['name'] ?? '-').toString(),
+                                      style: const TextStyle(fontSize: 11.2),
+                                    ),
+                                    onPressed: () {
+                                      setState(() => _applyProductSelection(p));
+                                      _qtyFocus.requestFocus();
+                                    },
+                                  ),
+                                )
+                                .toList(),
                       ),
                     ],
                   ),
@@ -21814,7 +26291,8 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
                     controller: _discountPercentController,
                     keyboardType: TextInputType.number,
                     focusNode: _discountFocus,
-                    onSubmitted: (_) => nextFocus(context, _discountAmountFocus),
+                    onSubmitted: (_) =>
+                        nextFocus(context, _discountAmountFocus),
                   ),
                 ),
               ),
@@ -21826,7 +26304,7 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
                     controller: _discountAmountController,
                     keyboardType: TextInputType.number,
                     focusNode: _discountAmountFocus,
-                    onSubmitted: (_) => nextFocus(context, _productFocus),
+                    onSubmitted: (_) => nextFocus(context, _barcodeFocus),
                   ),
                 ),
               ),
@@ -21858,6 +26336,11 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
           Row(
             children: const [
               Expanded(
+                flex: 2,
+                child: Text('Barcode', style: TextStyle(fontSize: 11)),
+              ),
+              SizedBox(width: 8),
+              Expanded(
                 flex: 4,
                 child: Text('Product', style: TextStyle(fontSize: 11)),
               ),
@@ -21878,6 +26361,15 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
           const SizedBox(height: 6),
           Row(
             children: [
+              Expanded(
+                flex: 2,
+                child: _compactInput(
+                  controller: _barcodeController,
+                  focusNode: _barcodeFocus,
+                  onSubmitted: (_) => _tryAddFromBarcode(),
+                ),
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 flex: 4,
                 child: RawAutocomplete<Map<String, dynamic>>(
@@ -21909,14 +26401,19 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
                               final row = options.elementAt(index);
                               final name = (row['name'] ?? '').toString();
                               final company = (row['company'] ?? '').toString();
-                              final mrp = _toDouble(row['mrp']).toStringAsFixed(2);
-                              final stock = _toDouble(row['stock']).toStringAsFixed(2);
+                              final mrp = _toDouble(
+                                row['mrp'],
+                              ).toStringAsFixed(2);
+                              final stock = _toDouble(
+                                row['stock'],
+                              ).toStringAsFixed(2);
                               return InkWell(
                                 onTap: () => onSelected(row),
                                 child: Padding(
                                   padding: const EdgeInsets.all(8),
                                   child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(
                                         '$name${company.isNotEmpty ? ' - $company' : ''}',
@@ -21948,7 +26445,7 @@ class _InvoiceModuleScreenState extends State<_InvoiceModuleScreen> {
                         return _compactInput(
                           controller: textController,
                           focusNode: focusNode,
-                          onSubmitted: (_) => nextFocus(context, _packFocus),
+                          onSubmitted: (_) => _commitEntryRow(),
                         );
                       },
                 ),
