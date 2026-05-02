@@ -9,11 +9,12 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 part 'top_menu_module.dart';
 part 'data_store.dart';
+part 'erp_masters_part.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    await HealthDatabase.instance.initialize();
+  await HealthDatabase.instance.initialize();
     await hydrateAppDataFromDatabase();
     // await fillDemoDataNow(); // Uncomment once to merge idempotent demo data, then comment again.
   } catch (e, st) {
@@ -375,6 +376,61 @@ CREATE TABLE IF NOT EXISTS daily_closing (
     );
   }
 
+  /// ERP reference masters (separate from transactional accounts/products).
+  static Future<void> _createErpMasterTables(Database db) async {
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS category_master (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  description TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS tax_category (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  gst_percent REAL NOT NULL DEFAULT 0,
+  remarks TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS stockist_master (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  mobile TEXT,
+  address TEXT,
+  city TEXT,
+  gst TEXT,
+  drug_license TEXT,
+  remarks TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS speciality_master (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  description TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+    await db.execute('''
+CREATE TABLE IF NOT EXISTS schedule_category (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  description TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)
+''');
+  }
+
   static Future<void> _enableForeignKeys(Database db) async {
     await db.execute('PRAGMA foreign_keys = ON');
   }
@@ -509,7 +565,7 @@ CREATE TABLE IF NOT EXISTS daily_closing (
       final String dbPath = p.join(await getDatabasesPath(), dbFileName);
       _db = await openDatabase(
         dbPath,
-        version: 3,
+        version: 4,
         onCreate: (db, version) async {
           await db.execute('''
             CREATE TABLE account_master (
@@ -548,6 +604,7 @@ CREATE TABLE IF NOT EXISTS daily_closing (
           ''');
           await _createJsonStoreTables(db);
           await _createMedStoreRelationalTables(db);
+          await _createErpMasterTables(db);
           await _enableForeignKeys(db);
         },
         onUpgrade: (db, oldVersion, newVersion) async {
@@ -556,6 +613,9 @@ CREATE TABLE IF NOT EXISTS daily_closing (
           }
           if (oldVersion < 3) {
             await _createMedStoreRelationalTables(db);
+          }
+          if (oldVersion < 4) {
+            await _createErpMasterTables(db);
           }
           await _enableForeignKeys(db);
         },
@@ -1811,6 +1871,12 @@ class _HomePageState extends State<HomePage> {
   bool _showDoctorMaster = false;
   bool _showGenericMaster = false;
   bool _showAccountInformationEdit = false;
+  bool _showStockistMaster = false;
+  bool _showTaxCategoryGst = false;
+  bool _showProductInfoEdit = false;
+  bool _showSpecialityMaster = false;
+  bool _showCategoryMaster = false;
+  bool _showScheduledCategory = false;
   bool _showAccountGroup = false;
   bool _showConnectedBank = false;
   bool _showOpeningBalance = false;
@@ -1909,6 +1975,12 @@ class _HomePageState extends State<HomePage> {
     _showDoctorMaster = widget.initialModule == 'doctor';
     _showGenericMaster = widget.initialModule == 'generic';
     _showAccountInformationEdit = widget.initialModule == 'account-info-edit';
+    _showStockistMaster = widget.initialModule == 'stockist-master';
+    _showTaxCategoryGst = widget.initialModule == 'tax-category-gst';
+    _showProductInfoEdit = widget.initialModule == 'product-info-edit';
+    _showSpecialityMaster = widget.initialModule == 'speciality-master';
+    _showCategoryMaster = widget.initialModule == 'category-master';
+    _showScheduledCategory = widget.initialModule == 'schedule-category';
     _showAccountGroup = widget.initialModule == 'account-group';
     _showConnectedBank = widget.initialModule == 'connected-bank';
     _showOpeningBalance = widget.initialModule == 'opening-balance';
@@ -1940,6 +2012,12 @@ class _HomePageState extends State<HomePage> {
     _showDoctorMaster = false;
     _showGenericMaster = false;
     _showAccountInformationEdit = false;
+    _showStockistMaster = false;
+    _showTaxCategoryGst = false;
+    _showProductInfoEdit = false;
+    _showSpecialityMaster = false;
+    _showCategoryMaster = false;
+    _showScheduledCategory = false;
     _showAccountGroup = false;
     _showConnectedBank = false;
     _showOpeningBalance = false;
@@ -1978,6 +2056,12 @@ class _HomePageState extends State<HomePage> {
       _showDoctorMaster = screen == 'doctor';
       _showGenericMaster = screen == 'generic';
       _showAccountInformationEdit = screen == 'account-info-edit';
+      _showStockistMaster = screen == 'stockist-master';
+      _showTaxCategoryGst = screen == 'tax-category-gst';
+      _showProductInfoEdit = screen == 'product-info-edit';
+      _showSpecialityMaster = screen == 'speciality-master';
+      _showCategoryMaster = screen == 'category-master';
+      _showScheduledCategory = screen == 'schedule-category';
       _showAccountGroup = screen == 'account-group';
       _showConnectedBank = screen == 'connected-bank';
       _showOpeningBalance = screen == 'opening-balance';
@@ -2233,6 +2317,24 @@ class _HomePageState extends State<HomePage> {
         break;
       case 'Patient Master':
         _openScreen('patient-master');
+        break;
+      case 'Stockist Master':
+        _openScreen('stockist-master');
+        break;
+      case 'Product Info Edit':
+        _openScreen('product-info-edit');
+        break;
+      case 'Tax Category (GST)':
+        _openScreen('tax-category-gst');
+        break;
+      case 'Speciality Master':
+        _openScreen('speciality-master');
+        break;
+      case 'Category Master':
+        _openScreen('category-master');
+        break;
+      case 'Scheduled Category':
+        _openScreen('schedule-category');
         break;
       case 'Stock Point':
         _openScreen('stock-point');
@@ -2581,38 +2683,44 @@ class _HomePageState extends State<HomePage> {
     switch (id) {
       case 'account_master':
         _performShortcut(
-          'Account Master',
-          () => _openMasterMenuItem('Account Master'),
+        'Account Master',
+        () => _openMasterMenuItem('Account Master'),
         );
         break;
       case 'stockist_master':
         _performShortcut(
-          'Stockist Master',
-          () => _openMasterMenuItem('Stockist Master'),
+        'Stockist Master',
+        () => _openMasterMenuItem('Stockist Master'),
+        );
+        break;
+      case 'product_master':
+        _performShortcut(
+          'Product Master',
+          () => _openMasterMenuItem('Product Master'),
         );
         break;
       case 'generic_master':
         _performShortcut(
-          'Generic Master',
-          () => _openMasterMenuItem('Generic Master'),
+        'Generic Master',
+        () => _openMasterMenuItem('Generic Master'),
         );
         break;
       case 'sales_invoice':
         _performShortcut(
-          'Sales Invoice',
+        'Sales Invoice',
           () => _openInvoiceMenuItem('Sales Invoice'),
         );
         break;
       case 'purchase_bill':
         _performShortcut(
-          'Purchase Bill',
+        'Purchase Bill',
           () => _openInvoiceMenuItem('Purchase Bill'),
         );
         break;
       case 'delivery_memo':
         _performShortcut(
-          'Delivery Memo',
-          () => _openInvoiceMenuItem('Delivery Memo'),
+        'Delivery Memo',
+        () => _openInvoiceMenuItem('Delivery Memo'),
         );
         break;
       case 'other_issue_receipt':
@@ -2623,19 +2731,19 @@ class _HomePageState extends State<HomePage> {
         break;
       case 'credit_debit_note':
         _performShortcut(
-          'Credit/Debit Note',
-          () => _openInvoiceMenuItem('Credit/Debit Note'),
+        'Credit/Debit Note',
+        () => _openInvoiceMenuItem('Credit/Debit Note'),
         );
         break;
       case 'currency_reconciliation':
         _performShortcut(
-          'Currency Reconciliation',
+        'Currency Reconciliation',
           () => _openAccountMenuItem('Currency Reconciliation'),
         );
         break;
       case 'general_ledger':
         _performShortcut(
-          'General Ledger',
+        'General Ledger',
           () => _openAccountMenuItem('General Ledger'),
         );
         break;
@@ -2749,6 +2857,8 @@ class _HomePageState extends State<HomePage> {
         const SingleActivator(LogicalKeyboardKey.keyI, control: true):
             _OpenMenuShortcutIntent('sales_invoice'),
         const SingleActivator(LogicalKeyboardKey.keyP, control: true):
+            _OpenMenuShortcutIntent('product_master'),
+        const SingleActivator(LogicalKeyboardKey.keyP, control: true, shift: true):
             _OpenMenuShortcutIntent('purchase_bill'),
         const SingleActivator(LogicalKeyboardKey.keyD, control: true):
             _OpenMenuShortcutIntent('delivery_memo'),
@@ -3081,12 +3191,52 @@ class _HomePageState extends State<HomePage> {
                                 setState(() => _placeholderMasterTitle = null);
                               },
                             )
+                          : _showStockistMaster
+                          ? StockistMasterScreen(
+                              onClose: () {
+                                setState(() => _showStockistMaster = false);
+                              },
+                            )
+                          : _showTaxCategoryGst
+                          ? TaxCategoryGstScreen(
+                              onClose: () {
+                                setState(() => _showTaxCategoryGst = false);
+                              },
+                            )
+                          : _showProductInfoEdit
+                          ? ProductInfoEditScreen(
+                              onClose: () {
+                                setState(() {
+                                  _showProductInfoEdit = false;
+                                });
+                                _loadDashboardStats();
+                              },
+                            )
+                          : _showSpecialityMaster
+                          ? SpecialityMasterScreen(
+                              onClose: () {
+                                setState(() => _showSpecialityMaster = false);
+                              },
+                            )
+                          : _showCategoryMaster
+                          ? CategoryMasterScreen(
+                              onClose: () {
+                                setState(() => _showCategoryMaster = false);
+                              },
+                            )
+                          : _showScheduledCategory
+                          ? ScheduledCategoryMasterScreen(
+                              onClose: () {
+                                setState(() => _showScheduledCategory = false);
+                              },
+                            )
                           : _showAccountInformationEdit
                           ? AccountInformationEditScreen(
                               onClose: () {
                                 setState(
                                   () => _showAccountInformationEdit = false,
                                 );
+                                _loadDashboardStats();
                               },
                             )
                           : _showDoctorMaster
@@ -3672,7 +3822,7 @@ class _MasterDropdownMenuState extends State<MasterDropdownMenu> {
                 _buildMenuItemRow(5, 'Opening Balance', ''),
                 _divider(),
                 _buildMenuItemRow(6, 'Company Master', ''),
-                _buildMenuItemRow(7, 'Product Master', ''),
+                _buildMenuItemRow(7, 'Product Master', 'Ctrl+P'),
                 _buildMenuItemRow(8, 'Product Info Edit', ''),
                 _buildMenuItemRow(9, 'Tax Category (GST)', ''),
                 _buildMenuItemRow(10, 'Opening Stock', ''),
@@ -3976,7 +4126,7 @@ class _InvoiceDropdownMenuState extends State<InvoiceDropdownMenu> {
                 _buildMenuItemRow(0, 'Sales Invoice', 'Ctrl+I'),
                 _buildMenuItemRow(1, 'Invoice Print', ''),
                 _divider(),
-                _buildMenuItemRow(2, 'Purchase Bill', 'Ctrl+P'),
+                _buildMenuItemRow(2, 'Purchase Bill', 'Ctrl+Shift+P'),
                 _buildMenuItemRow(3, 'Delivery Memo', 'Ctrl+D'),
                 _buildMenuItemRow(4, 'Other Inputs (RCM)', ''),
                 _divider(),
@@ -5321,7 +5471,7 @@ class _SubMenuButtonState extends State<SubMenuButton> {
             border: Border.all(color: border, width: widget.isActive ? 1.2 : 1),
             boxShadow: [
               if (widget.isActive || isHovered)
-                BoxShadow(
+              BoxShadow(
                   color: _DashUi.teal.withValues(
                     alpha: widget.isActive ? 0.22 : 0.12,
                   ),
@@ -5345,9 +5495,9 @@ class _SubMenuButtonState extends State<SubMenuButton> {
               ),
               const SizedBox(width: 8),
               Text(
-                widget.label,
-                style: TextStyle(
-                  fontSize: 13,
+            widget.label,
+            style: TextStyle(
+              fontSize: 13,
                   fontWeight: widget.isActive
                       ? FontWeight.w700
                       : FontWeight.w600,
@@ -5829,17 +5979,17 @@ class HomeCenterContent extends StatelessWidget {
     final recent = recentActivity.take(10).toList();
     return TweenAnimationBuilder<double>(
       duration: const Duration(milliseconds: 640),
-      tween: Tween<double>(begin: 0, end: 1),
+        tween: Tween<double>(begin: 0, end: 1),
       curve: Curves.easeOutCubic,
       builder: (context, t, child) {
-        return Opacity(
+          return Opacity(
           opacity: t,
-          child: Transform.translate(
+            child: Transform.translate(
             offset: Offset(0, (1 - t) * 12),
-            child: child,
-          ),
-        );
-      },
+              child: child,
+            ),
+          );
+        },
       child: LayoutBuilder(
         builder: (context, c) {
           final raw = c.maxWidth.isFinite ? c.maxWidth : 1280.0;
@@ -5850,9 +6000,9 @@ class HomeCenterContent extends StatelessWidget {
               alignment: Alignment.topCenter,
               child: ConstrainedBox(
                 constraints: BoxConstraints(maxWidth: maxW),
-                child: Column(
+          child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
+            children: [
                     _HomeWelcomeHeader(dateLine: _todayLine()),
                     const SizedBox(height: 22),
                     Text('OVERVIEW', style: _DashUi.sectionTitle()),
@@ -5930,7 +6080,7 @@ class HomeCenterContent extends StatelessWidget {
                         'Lifetime sales: ₹ ${todaySales.toStringAsFixed(0)}  ·  '
                         'Lifetime purchase: ₹ ${totalPurchase.toStringAsFixed(0)}  ·  '
                         'Invoices: $pendingBills',
-                        style: TextStyle(
+                style: TextStyle(
                           fontSize: 11,
                           color: _DashUi.textSoft,
                           fontStyle: FontStyle.italic,
@@ -5999,7 +6149,7 @@ class HomeCenterContent extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 26),
-                    Text(
+              Text(
                       'BUSINESS INTELLIGENCE',
                       style: _DashUi.sectionTitle(),
                     ),
@@ -6014,7 +6164,7 @@ class HomeCenterContent extends StatelessWidget {
                             child: topSellingProducts.isEmpty
                                 ? const Text(
                                     'No sales yet. Top products will appear here.',
-                                    style: TextStyle(
+                style: TextStyle(
                                       fontSize: 12,
                                       color: Color(0xFF64748B),
                                     ),
@@ -6026,9 +6176,9 @@ class HomeCenterContent extends StatelessWidget {
                                             padding: const EdgeInsets.only(
                                               bottom: 8,
                                             ),
-                                            child: Row(
-                                              children: [
-                                                Expanded(
+                child: Row(
+                  children: [
+                    Expanded(
                                                   child: Text(
                                                     (row['name'] ?? '-')
                                                         .toString(),
@@ -6072,9 +6222,9 @@ class HomeCenterContent extends StatelessWidget {
                                         )
                                         .toList(),
                                   ),
-                          ),
-                        ),
-                        const SizedBox(width: 12),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
                         SizedBox(
                           width: 300,
                           child: _SectionCard(
@@ -6096,7 +6246,7 @@ class HomeCenterContent extends StatelessWidget {
                                   ),
                                 ),
                                 const SizedBox(width: 10),
-                                Expanded(
+                    Expanded(
                                   child: Text(
                                     bestCustomer.isEmpty ? '-' : bestCustomer,
                                     style: const TextStyle(
@@ -6129,7 +6279,7 @@ class HomeCenterContent extends StatelessWidget {
                                 color: Color(0xFFB45309),
                               ),
                               const SizedBox(width: 8),
-                              Expanded(
+                    Expanded(
                                 child: Text(
                                   nearExpiryCount == 0
                                       ? 'No near-expiry medicine alerts.'
@@ -6139,10 +6289,10 @@ class HomeCenterContent extends StatelessWidget {
                                     fontWeight: FontWeight.w600,
                                     color: Color(0xFF92400E),
                                   ),
-                                ),
-                              ),
-                            ],
-                          ),
+                      ),
+                    ),
+                  ],
+                ),
                           const SizedBox(height: 8),
                           Row(
                             children: [
@@ -6168,7 +6318,7 @@ class HomeCenterContent extends StatelessWidget {
                           ),
                           const SizedBox(height: 8),
                           Row(
-                            children: [
+                children: [
                               const Icon(
                                 Icons.account_balance_wallet_rounded,
                                 size: 17,
@@ -6186,12 +6336,12 @@ class HomeCenterContent extends StatelessWidget {
                                     color: Color(0xFF991B1B),
                                   ),
                                 ),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
                     const SizedBox(height: 26),
                     Text('RECENT ACTIVITY', style: _DashUi.sectionTitle()),
                     const SizedBox(height: 10),
@@ -6361,7 +6511,7 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOutCubic,
           padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
-          decoration: BoxDecoration(
+      decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(20),
             gradient: LinearGradient(
               begin: Alignment.topLeft,
@@ -6382,8 +6532,8 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
                   : const Color(0xFFE2E8F0),
               width: _hover ? 1.25 : 1,
             ),
-            boxShadow: [
-              BoxShadow(
+        boxShadow: [
+          BoxShadow(
                 color: _DashUi.teal.withValues(alpha: _hover ? 0.14 : 0.06),
                 blurRadius: _hover ? 28 : 18,
                 offset: Offset(0, _hover ? 12 : 8),
@@ -6395,9 +6545,9 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
                 ).withValues(alpha: _hover ? 0.09 : 0.05),
                 blurRadius: _hover ? 22 : 14,
                 offset: const Offset(0, 6),
-              ),
-            ],
           ),
+        ],
+      ),
           child: Stack(
             children: [
               if (widget.accentWarm)
@@ -6415,11 +6565,11 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
                 ),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
+        children: [
+          Container(
                     width: 48,
                     height: 48,
-                    decoration: BoxDecoration(
+            decoration: BoxDecoration(
                       color: widget.iconBg.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(14),
                       border: Border.all(
@@ -6429,23 +6579,23 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
                     child: Icon(widget.icon, size: 26, color: widget.iconBg),
                   ),
                   const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
                           widget.title,
                           style: const TextStyle(
                             fontSize: 13,
                             color: _DashUi.text,
                             fontWeight: FontWeight.w700,
                             letterSpacing: -0.1,
-                          ),
-                        ),
-                        const SizedBox(height: 3),
-                        Text(
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
                           widget.subtitle,
-                          style: const TextStyle(
+                  style: const TextStyle(
                             fontSize: 11,
                             color: _DashUi.textSoft,
                             fontWeight: FontWeight.w500,
@@ -6474,10 +6624,10 @@ class _HomeMetricCardState extends State<_HomeMetricCard> {
                             ],
                           ],
                         ),
-                      ],
-                    ),
-                  ),
-                ],
+              ],
+            ),
+          ),
+        ],
               ),
             ],
           ),
@@ -6520,7 +6670,7 @@ class _HomeQuickTileState extends State<_HomeQuickTile> {
         alignment: Alignment.center,
         child: GestureDetector(
           onTap: widget.onTap,
-          child: AnimatedContainer(
+      child: AnimatedContainer(
             duration: const Duration(milliseconds: 220),
             curve: Curves.easeOutCubic,
             width: 204,
@@ -6668,16 +6818,16 @@ class _HomeActivityPanel extends StatelessWidget {
                     '${entries[i]['action'] ?? ''}',
                     style: const TextStyle(
                       fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
+              fontWeight: FontWeight.w600,
                       color: _DashUi.text,
-                    ),
-                  ),
+            ),
+            ),
                   subtitle: Text(
                     '${entries[i]['user'] ?? ''} · ${_fmtActivityTime(entries[i]['at'])}',
                     style: const TextStyle(
                       fontSize: 11,
                       color: _DashUi.textSoft,
-                    ),
+          ),
                   ),
                 ),
               ),
@@ -6848,16 +6998,16 @@ class _GenericMasterScreenState extends State<GenericMasterScreen> {
           'products': selectedProducts,
         };
       } else {
-        generics.add({
-          'id': _genericSeed++,
-          'name': nameController.text.trim(),
-          'shortName': shortNameController.text.trim(),
-          'remarks': remarksController.text.trim(),
-          'schedule': _schedule,
-          'product': productController.text.trim(),
-          'products': selectedProducts,
-        });
-        _selectedRecordIndex = generics.length - 1;
+      generics.add({
+        'id': _genericSeed++,
+        'name': nameController.text.trim(),
+        'shortName': shortNameController.text.trim(),
+        'remarks': remarksController.text.trim(),
+        'schedule': _schedule,
+        'product': productController.text.trim(),
+        'products': selectedProducts,
+      });
+      _selectedRecordIndex = generics.length - 1;
       }
     });
 
@@ -7112,9 +7262,9 @@ class _GenericMasterScreenState extends State<GenericMasterScreen> {
                         child: SingleChildScrollView(
                           scrollDirection: Axis.horizontal,
                           child: actionPane,
-                        ),
-                      ),
-                    ],
+                  ),
+                ),
+              ],
                   );
                 }
                 return Row(
@@ -7528,281 +7678,6 @@ class GenericMasterRecordTable extends StatelessWidget {
                   ),
                 );
               },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class AccountInformationEditScreen extends StatefulWidget {
-  final VoidCallback? onClose;
-
-  const AccountInformationEditScreen({super.key, this.onClose});
-
-  @override
-  State<AccountInformationEditScreen> createState() =>
-      _AccountInformationEditScreenState();
-}
-
-class _AccountInformationEditScreenState
-    extends State<AccountInformationEditScreen> {
-  static const List<String> _sortingTypes = [
-    'AccountWise',
-    'NameWise',
-    'CityWise',
-  ];
-
-  String selectedSortingType = 'AccountWise';
-  bool isEditing = false;
-
-  @override
-  void initState() {
-    super.initState();
-    selectedSortingType = sortingType;
-  }
-
-  void _showMessage(String message) {
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    messenger?.hideCurrentSnackBar();
-    messenger?.showSnackBar(
-      SnackBar(
-        content: Text(message),
-        duration: const Duration(milliseconds: 900),
-      ),
-    );
-  }
-
-  void _handleEdit() {
-    setState(() {
-      isEditing = !isEditing;
-    });
-  }
-
-  void _handleSave() {
-    setState(() {
-      sortingType = selectedSortingType;
-      isEditing = false;
-    });
-    debugPrint('Selected sorting type: $selectedSortingType');
-    _showMessage('Saved Successfully');
-  }
-
-  void _handleClear() {
-    setState(() {
-      selectedSortingType = 'AccountWise';
-      sortingType = 'AccountWise';
-      isEditing = false;
-    });
-    _showMessage('Cleared');
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: const Color(0xFFF1F1F1),
-      child: Column(
-        children: [
-          Container(
-            height: 32,
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  Color(0xFFB0302D),
-                  Color(0xFF8B2FA1),
-                  Color(0xFF4A4FB5),
-                ],
-                begin: Alignment.centerLeft,
-                end: Alignment.centerRight,
-              ),
-            ),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    'Account Information Edit',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 30 / 2.2,
-                      fontWeight: FontWeight.bold,
-                      height: 1.0,
-                    ),
-                  ),
-                ),
-                if (widget.onClose != null)
-                  InkWell(
-                    onTap: widget.onClose,
-                    borderRadius: BorderRadius.circular(3),
-                    child: const Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      child: Icon(Icons.close, color: Colors.white70, size: 16),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                SizedBox(
-                  width: 400,
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 10, 8, 8),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            const SizedBox(
-                              width: 86,
-                              child: Text(
-                                'Sorting Type',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: SizedBox(
-                                height: 28,
-                                child: DropdownButtonFormField<String>(
-                                  value: selectedSortingType,
-                                  disabledHint: Text(
-                                    selectedSortingType,
-                                    style: const TextStyle(
-                                      fontSize: 12.5,
-                                      color: Colors.black87,
-                                    ),
-                                  ),
-                                  icon: const Icon(
-                                    Icons.arrow_drop_down,
-                                    size: 18,
-                                  ),
-                                  style: const TextStyle(
-                                    fontSize: 12.5,
-                                    color: Colors.black87,
-                                  ),
-                                  decoration: InputDecoration(
-                                    isDense: true,
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 6,
-                                    ),
-                                    filled: true,
-                                    fillColor: Colors.white,
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(2),
-                                      borderSide: BorderSide(
-                                        color: Colors.grey.shade500,
-                                        width: 0.8,
-                                      ),
-                                    ),
-                                    enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(2),
-                                      borderSide: BorderSide(
-                                        color: Colors.grey.shade500,
-                                        width: 0.8,
-                                      ),
-                                    ),
-                                    focusedBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(2),
-                                      borderSide: BorderSide(
-                                        color: Colors.blueGrey.shade400,
-                                        width: 1,
-                                      ),
-                                    ),
-                                  ),
-                                  items: _sortingTypes
-                                      .map(
-                                        (type) => DropdownMenuItem<String>(
-                                          value: type,
-                                          child: Text(
-                                            type,
-                                            style: const TextStyle(
-                                              fontSize: 12.5,
-                                            ),
-                                          ),
-                                        ),
-                                      )
-                                      .toList(),
-                                  onChanged: isEditing
-                                      ? (value) {
-                                          if (value != null) {
-                                            setState(() {
-                                              selectedSortingType = value;
-                                            });
-                                          }
-                                        }
-                                      : null,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                Expanded(
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF6F2F2),
-                      border: Border(
-                        left: BorderSide(color: Colors.grey.shade300),
-                      ),
-                    ),
-                    alignment: Alignment.center,
-                    child: Opacity(
-                      opacity: 0.07,
-                      child: Icon(
-                        Icons.local_pharmacy_rounded,
-                        size: 260,
-                        color: Colors.blueGrey.shade400,
-                      ),
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: 150,
-                  child: Container(
-                    color: const Color(0xFFF1F1F1),
-                    padding: const EdgeInsets.fromLTRB(8, 10, 20, 8),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      mainAxisAlignment: MainAxisAlignment.start,
-                      children: [
-                        MasterActionButton(
-                          label: 'Edit',
-                          icon: Icons.edit,
-                          accentColor: Colors.grey.shade700,
-                          onPressed: _handleEdit,
-                        ),
-                        const SizedBox(height: 10),
-                        MasterActionButton(
-                          label: 'Save',
-                          icon: Icons.save,
-                          accentColor: Colors.green.shade700,
-                          onPressed: _handleSave,
-                        ),
-                        const SizedBox(height: 10),
-                        MasterActionButton(
-                          label: 'Clear',
-                          icon: Icons.cleaning_services,
-                          accentColor: Colors.blueGrey.shade600,
-                          onPressed: _handleClear,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
             ),
           ),
         ],
@@ -13526,14 +13401,14 @@ class _SectionCard extends StatelessWidget {
                 Row(
                   children: [
                     Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            title,
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
                               color: AppUi.text,
                               letterSpacing: 0.2,
                             ),
@@ -13554,8 +13429,8 @@ class _SectionCard extends StatelessWidget {
                       ),
                     ),
                   ],
-                ),
-                const SizedBox(height: 10),
+            ),
+            const SizedBox(height: 10),
                 Container(height: 1, color: AppUi.border),
                 const SizedBox(height: 10),
                 if (expandChild || isBoundedHeight)
@@ -13774,12 +13649,12 @@ class _MasterCrudLayout extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        title,
-                        style: const TextStyle(
-                          color: Colors.white,
+                    title,
+                    style: const TextStyle(
+                      color: Colors.white,
                           fontSize: 14,
                           fontWeight: FontWeight.w700,
-                          height: 1.0,
+                      height: 1.0,
                           letterSpacing: 0.2,
                         ),
                       ),
@@ -13854,7 +13729,7 @@ class _MasterCrudLayout extends StatelessWidget {
                                       title: 'Filters / Input',
                                       subtitle:
                                           'Refine, enter and validate module inputs before save',
-                                      child: formChild,
+                              child: formChild,
                                     ),
                             ),
                           ),
@@ -13879,37 +13754,37 @@ class _MasterCrudLayout extends StatelessWidget {
                             10,
                             10,
                           ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.end,
-                            children: [
-                              MasterActionButton(
-                                label: 'Edit',
-                                icon: Icons.edit,
-                                accentColor: Colors.grey.shade700,
-                                onPressed: onEdit,
-                              ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            MasterActionButton(
+                              label: 'Edit',
+                              icon: Icons.edit,
+                              accentColor: Colors.grey.shade700,
+                              onPressed: onEdit,
+                            ),
                               const SizedBox(height: 8),
-                              MasterActionButton(
-                                label: 'Delete',
-                                icon: Icons.delete_outline,
-                                accentColor: Colors.red.shade600,
-                                onPressed: onDelete,
-                              ),
+                            MasterActionButton(
+                              label: 'Delete',
+                              icon: Icons.delete_outline,
+                              accentColor: Colors.red.shade600,
+                              onPressed: onDelete,
+                            ),
                               const SizedBox(height: 8),
-                              MasterActionButton(
-                                label: 'Save',
-                                icon: Icons.save,
-                                accentColor: Colors.green.shade700,
-                                onPressed: onSave,
-                              ),
+                            MasterActionButton(
+                              label: 'Save',
+                              icon: Icons.save,
+                              accentColor: Colors.green.shade700,
+                              onPressed: onSave,
+                            ),
                               const SizedBox(height: 8),
-                              MasterActionButton(
-                                label: 'Clear',
-                                icon: Icons.cleaning_services,
-                                accentColor: Colors.blueGrey.shade600,
-                                onPressed: onClear,
-                              ),
-                            ],
+                            MasterActionButton(
+                              label: 'Clear',
+                              icon: Icons.cleaning_services,
+                              accentColor: Colors.blueGrey.shade600,
+                              onPressed: onClear,
+                            ),
+                          ],
                           ),
                         ),
                       ),
@@ -14177,8 +14052,8 @@ class _SimpleTableState extends State<_SimpleTable> {
                 )
               : 230.0;
           return Column(
-            children: [
-              Container(
+        children: [
+          Container(
                 height: controlsHeight,
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 decoration: BoxDecoration(
@@ -14190,7 +14065,7 @@ class _SimpleTableState extends State<_SimpleTable> {
                     bottom: BorderSide(color: Colors.blueGrey.shade100),
                   ),
                 ),
-                child: Row(
+            child: Row(
                   children: [
                     Expanded(
                       child: SizedBox(
@@ -14272,17 +14147,17 @@ class _SimpleTableState extends State<_SimpleTable> {
                 color: AppUi.primarySoft,
                 child: Row(
                   children: widget.headers
-                      .map((h) => _SimpleTableHeaderCell(text: h, flex: 1))
-                      .toList(),
-                ),
-              ),
+                  .map((h) => _SimpleTableHeaderCell(text: h, flex: 1))
+                  .toList(),
+            ),
+          ),
               SizedBox(
                 height: listHeight,
                 child: filteredIndexes.isEmpty
                     ? const _NoDataPanel(message: 'No data available')
                     : ListView.builder(
                         itemCount: filteredIndexes.length,
-                        itemBuilder: (context, index) {
+              itemBuilder: (context, index) {
                           final actualIndex = filteredIndexes[index];
                           final row = widget.rows[actualIndex];
                           final selected = widget.selectedIndex == actualIndex;
@@ -14296,14 +14171,14 @@ class _SimpleTableState extends State<_SimpleTable> {
                             onExit: (_) => setState(() => _hoveredIndex = null),
                             child: InkWell(
                               onTap: () => widget.onRowTap(actualIndex),
-                              child: Container(
+                  child: Container(
                                 height: 30,
                                 color: selected
                                     ? const Color(0xFFDDE8FF)
                                     : hovered
                                     ? const Color(0xFFEFF6FF)
                                     : baseColor,
-                                child: Row(
+                    child: Row(
                                   children: row
                                       .map(
                                         (v) => _SimpleTableValueCell(
@@ -14311,15 +14186,15 @@ class _SimpleTableState extends State<_SimpleTable> {
                                           flex: 1,
                                         ),
                                       )
-                                      .toList(),
+                          .toList(),
                                 ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-              ),
-            ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
           );
         },
       ),
@@ -17085,10 +16960,10 @@ class AccountMasterFormPane extends StatelessWidget {
           ),
         ],
       ),
-      child: SingleChildScrollView(
-        child: Column(
+          child: SingleChildScrollView(
+                  child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+                    children: [
             const Text(
               'Customer / supplier master',
               style: TextStyle(
@@ -17098,33 +16973,33 @@ class AccountMasterFormPane extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 10),
-            FormRow(
+                      FormRow(
               label: 'Name *',
-              field: _textInput(
-                context: context,
-                controller: controllers['name'],
-                focusNode: focusNodes['name'],
+                        field: _textInput(
+                          context: context,
+                          controller: controllers['name'],
+                          focusNode: focusNodes['name'],
                 nextFocusNode: focusNodes['mobile'],
-                autofocus: true,
-              ),
-            ),
-            FormRow(
+                          autofocus: true,
+                        ),
+                      ),
+                      FormRow(
               label: 'Mobile',
-              field: _textInput(
-                context: context,
+                        field: _textInput(
+                          context: context,
                 controller: controllers['mobile'],
                 focusNode: focusNodes['mobile'],
-                nextFocusNode: focusNodes['address1'],
-              ),
-            ),
-            FormRow(
-              label: 'Address',
-              topAligned: true,
+                          nextFocusNode: focusNodes['address1'],
+                        ),
+                      ),
+                      FormRow(
+                        label: 'Address',
+                        topAligned: true,
               field: SizedBox(
                 height: 52,
                 child: TextField(
-                  controller: controllers['address1'],
-                  focusNode: focusNodes['address1'],
+                              controller: controllers['address1'],
+                              focusNode: focusNodes['address1'],
                   maxLines: 2,
                   textInputAction: TextInputAction.next,
                   onSubmitted: (_) => nextFocus(context, focusNodes['gstin']),
@@ -17161,28 +17036,28 @@ class AccountMasterFormPane extends StatelessWidget {
                     ),
                   ),
                 ),
-              ),
-            ),
-            FormRow(
+                        ),
+                      ),
+                      FormRow(
               label: 'GST No',
-              field: _textInput(
-                context: context,
+                        field: _textInput(
+                          context: context,
                 controller: controllers['gstin'],
                 focusNode: focusNodes['gstin'],
                 nextFocusNode: focusNodes['openingBalance'],
-              ),
-            ),
-            FormRow(
+                        ),
+                      ),
+                      FormRow(
               label: 'Opening bal.',
-              field: _textInput(
-                context: context,
+                        field: _textInput(
+                          context: context,
                 controller: controllers['openingBalance'],
                 focusNode: focusNodes['openingBalance'],
                 nextFocusNode: focusNodes['saveBtn'],
                 keyboardType: TextInputType.number,
-              ),
-            ),
-            FormRow(
+                        ),
+                      ),
+                      FormRow(
               label: 'Account type',
               field: SizedBox(
                 height: 28,
@@ -17221,9 +17096,9 @@ class AccountMasterFormPane extends StatelessWidget {
                 ),
               ),
             ),
-          ],
-        ),
-      ),
+                          ],
+                        ),
+                      ),
     );
   }
 
