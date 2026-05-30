@@ -1,16 +1,55 @@
-# health_project
+# Health+ Medical Store Management System
 
-A new Flutter project.
+Health+ is a desktop-based Medical Store Management System developed using Flutter and SQLite.
 
-## Getting Started
+## Features
 
-This project is a starting point for a Flutter application.
+* Product & Inventory Management
+* Sales Invoice Management
+* Purchase Bill Management
+* Customer & Supplier Accounts
+* Doctor & Patient Records
+* GST Calculations
+* Stock Tracking & Alerts
+* Business Intelligence Dashboard
+* SQLite Database Persistence
+* Windows Desktop Support
 
-A few resources to get you started if this is your first Flutter project:
+## Technology Stack
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+* Flutter
+* Dart
+* SQLite
+* JSON Storage
+* Windows Desktop
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Architecture
+
+Hybrid Architecture (SQLite + JSON Persistence)
+
+## Modules
+
+* Product Master
+* Account Master
+* Sales Invoice
+* Purchase Invoice
+* Doctor Master
+* Patient Management
+* Inventory Management
+* Dashboard & Analytics
+
+## Database Features
+
+* Persistent SQLite Storage
+* Auto Data Hydration
+* Invoice Synchronization
+* Stock Tracking
+* Customer & Supplier Records
+
+## Project Type
+
+Desktop ERP Application
+
+## Industry
+
+Healthcare / Pharmacy Management
